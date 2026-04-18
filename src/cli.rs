@@ -58,3 +58,77 @@ impl Cli {
         self.settings.clone().or_else(crate::config::default_settings_path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_c_flag_executes_simple_command_contract() {
+        let cli = Cli::parse_from(["srt", "-c", "echo hello"]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, "echo hello");
+        assert!(shell_mode);
+    }
+
+    #[test]
+    fn test_c_flag_passes_command_string_directly_without_escaping() {
+        let cli = Cli::parse_from(["srt", "-c", r#"echo "hello world""#]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, r#"echo "hello world""#);
+        assert!(shell_mode);
+    }
+
+    #[test]
+    fn test_c_flag_handles_json_arguments_correctly() {
+        let cli = Cli::parse_from(["srt", "-c", r#"echo '{"key": "value"}'"#]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, r#"echo '{"key": "value"}'"#);
+        assert!(shell_mode);
+    }
+
+    #[test]
+    fn test_c_flag_handles_complex_json_with_nested_objects() {
+        let json = r#"{"servers":{"name":"test","type":"sdk"}}"#;
+        let cli = Cli::parse_from(["srt", "-c", &format!("echo '{json}'")]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, format!("echo '{json}'"));
+        assert!(shell_mode);
+    }
+
+    #[test]
+    fn test_default_mode_executes_simple_command_contract() {
+        let cli = Cli::parse_from(["srt", "echo", "hello"]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, "echo hello");
+        assert!(!shell_mode);
+    }
+
+    #[test]
+    fn test_default_mode_joins_multiple_positional_arguments_with_spaces() {
+        let cli = Cli::parse_from(["srt", "echo", "hello", "world"]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, "echo hello world");
+        assert!(!shell_mode);
+    }
+
+    #[test]
+    fn test_default_mode_handles_arguments_with_flags() {
+        let cli = Cli::parse_from(["srt", "echo", "-n", "no newline"]);
+        let (command, shell_mode) = cli.get_command().expect("command should exist");
+        assert_eq!(command, "echo -n 'no newline'");
+        assert!(!shell_mode);
+    }
+
+    #[test]
+    fn test_no_command_specified_returns_none() {
+        let cli = Cli::parse_from(["srt"]);
+        assert!(cli.get_command().is_none());
+    }
+
+    #[test]
+    fn test_only_options_without_command_returns_none() {
+        let cli = Cli::parse_from(["srt", "-d"]);
+        assert!(cli.get_command().is_none());
+    }
+}

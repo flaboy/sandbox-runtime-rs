@@ -45,6 +45,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if cli.command.is_some() {
+        tracing::debug!("Command string mode (-c): {}", command);
+    } else {
+        tracing::debug!("Original command: {}", command);
+    }
 
     // Initialize sandbox manager
     let manager = Arc::new(SandboxManager::new());

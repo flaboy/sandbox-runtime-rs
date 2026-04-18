@@ -1,6 +1,7 @@
 //! Debug logging utilities.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::io;
 
 use tracing_subscriber::EnvFilter;
 
@@ -16,15 +17,16 @@ pub fn init_debug_logging(force_debug: bool) {
     DEBUG_ENABLED.store(debug_enabled, Ordering::SeqCst);
 
     let filter = if debug_enabled {
-        EnvFilter::new("sandbox_runtime=debug,warn")
+        EnvFilter::new("sandbox_runtime=debug,srt=debug,warn")
     } else {
-        EnvFilter::new("sandbox_runtime=info,warn")
+        EnvFilter::new("warn")
     };
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .with_level(debug_enabled)
+        .with_writer(io::stderr)
         .with_ansi(true)
         .try_init()
         .ok();
