@@ -165,7 +165,7 @@ fn build_inner_command(
         parts.push(format!("{} {} -c {}", env_vars, shell, quote(command)));
     }
 
-    Ok(parts.join(" ; "))
+    Ok(parts.join("\n"))
 }
 
 /// Generate proxy environment variable exports.
@@ -173,7 +173,7 @@ fn generate_proxy_env_string(http_port: u16, socks_port: u16) -> String {
     format!(
         "export http_proxy='http://localhost:{}' https_proxy='http://localhost:{}' \
          HTTP_PROXY='http://localhost:{}' HTTPS_PROXY='http://localhost:{}' \
-         ALL_PROXY='socks5://localhost:{}' all_proxy='socks5://localhost:{}' ;",
+         ALL_PROXY='socks5://localhost:{}' all_proxy='socks5://localhost:{}'",
         http_port, http_port, http_port, http_port, socks_port, socks_port
     )
 }
@@ -196,12 +196,50 @@ pub fn generate_proxy_env(http_port: u16, socks_port: u16) -> Vec<(String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{NetworkConfig, SandboxRuntimeConfig};
+    use std::process::Command;
 
     #[test]
     fn test_generate_proxy_env_string() {
         let env = generate_proxy_env_string(3128, 1080);
         assert!(env.contains("http_proxy='http://localhost:3128'"));
         assert!(env.contains("ALL_PROXY='socks5://localhost:1080'"));
+    }
+
+    #[test]
+    fn test_build_inner_command_avoids_invalid_shell_separators() {
+        let config = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allow_all_unix_sockets: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let inner = build_inner_command(
+            "ffmpeg -version && which ffmpeg",
+            &config,
+            Some("/tmp/srt-http-test.sock"),
+            Some("/tmp/srt-socks-test.sock"),
+            46807,
+            36713,
+            "/bin/bash",
+        )
+        .expect("inner command should build");
+
+        assert!(!inner.contains("& ;"), "unexpected '& ;' in: {inner}");
+        assert!(!inner.contains("; ;"), "unexpected '; ;' in: {inner}");
+
+        let output = Command::new("/bin/bash")
+            .args(["-n", "-c", &inner])
+            .output()
+            .expect("bash should be available");
+
+        assert!(
+            output.status.success(),
+            "generated command should be valid shell, stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
