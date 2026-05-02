@@ -271,11 +271,9 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
         let root_bind = wrapped
-            .find("'--ro-bind' '/' '/'")
+            .find("--ro-bind / /")
             .expect("readonly root bind should exist");
-        let dev_mount = wrapped
-            .find("'--dev' '/dev'")
-            .expect("/dev mount should exist");
+        let dev_mount = wrapped.find("--dev /dev").expect("/dev mount should exist");
 
         assert!(
             root_bind < dev_mount,
