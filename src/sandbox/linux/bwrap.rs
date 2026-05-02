@@ -43,8 +43,6 @@ pub fn generate_bwrap_command(
     let mut bwrap_args = vec![
         "bwrap".to_string(),
         "--unshare-net".to_string(), // Network isolation
-        "--dev".to_string(),
-        "/dev".to_string(),
         "--proc".to_string(),
         "/proc".to_string(),
         "--tmpfs".to_string(),
@@ -57,6 +55,10 @@ pub fn generate_bwrap_command(
     bwrap_args.push("--ro-bind".to_string());
     bwrap_args.push("/".to_string());
     bwrap_args.push("/".to_string());
+
+    // Re-apply /dev after the readonly root bind so device nodes keep working.
+    bwrap_args.push("--dev".to_string());
+    bwrap_args.push("/dev".to_string());
 
     // Add writable mounts
     for mount in &mounts {
@@ -247,5 +249,37 @@ mod tests {
         // This test will pass/fail based on system configuration
         let available = check_bwrap();
         println!("Bubblewrap available: {}", available);
+    }
+
+    #[test]
+    fn test_generate_bwrap_command_mounts_dev_after_readonly_root() {
+        let config = SandboxRuntimeConfig::default();
+        let cwd = std::env::current_dir().expect("current dir should resolve");
+
+        let (wrapped, warnings) = generate_bwrap_command(
+            "echo hello",
+            &config,
+            &cwd,
+            None,
+            None,
+            3128,
+            1080,
+            Some("/bin/bash"),
+        )
+        .expect("bwrap command should build");
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let root_bind = wrapped
+            .find("'--ro-bind' '/' '/'")
+            .expect("readonly root bind should exist");
+        let dev_mount = wrapped
+            .find("'--dev' '/dev'")
+            .expect("/dev mount should exist");
+
+        assert!(
+            root_bind < dev_mount,
+            "/dev mount must be applied after readonly root so /dev/null stays usable: {wrapped}"
+        );
     }
 }
