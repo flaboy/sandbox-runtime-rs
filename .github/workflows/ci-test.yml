@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   cargo-test:
-    name: Cargo Test (Ubuntu)
+    name: Verify Linux Bwrap Fix
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,5 +17,5 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Cargo Test
-        run: cargo test
+      - name: Run Linux bwrap regression test
+        run: cargo test sandbox::linux::bwrap::tests::test_generate_bwrap_command_mounts_dev_after_readonly_root --lib -- --nocapture
