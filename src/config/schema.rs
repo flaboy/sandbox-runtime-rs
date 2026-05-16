@@ -62,6 +62,14 @@ pub struct FilesystemConfig {
     #[serde(default)]
     pub deny_read: Vec<String>,
 
+    /// Glob patterns denied for reading.
+    #[serde(default)]
+    pub deny_read_globs: Vec<String>,
+
+    /// Glob patterns hidden or denied from directory listing.
+    #[serde(default)]
+    pub deny_list_globs: Vec<String>,
+
     /// Paths allowed for writing.
     #[serde(default)]
     pub allow_write: Vec<String>,

@@ -90,6 +90,8 @@ mod tests {
             },
             "filesystem": {
                 "denyRead": ["/etc/passwd"],
+                "denyReadGlobs": ["/skills/**/*.md"],
+                "denyListGlobs": ["/skills/**/*.md"],
                 "allowWrite": ["/tmp"],
                 "denyWrite": ["/tmp/secret"],
                 "allowGitConfig": false
@@ -104,6 +106,8 @@ mod tests {
         assert_eq!(config.network.allow_local_binding, Some(true));
         assert!(config.network.mitm_proxy.is_some());
         assert_eq!(config.filesystem.deny_read.len(), 1);
+        assert_eq!(config.filesystem.deny_read_globs, vec!["/skills/**/*.md"]);
+        assert_eq!(config.filesystem.deny_list_globs, vec!["/skills/**/*.md"]);
         assert_eq!(config.filesystem.allow_write.len(), 1);
         assert_eq!(config.filesystem.deny_write.len(), 1);
         assert_eq!(config.mandatory_deny_search_depth, Some(5));

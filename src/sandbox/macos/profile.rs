@@ -140,7 +140,7 @@ fn generate_filesystem_rules(profile: &mut String, config: &FilesystemConfig) {
     profile.push_str("(allow file-read*)\n");
 
     // Deny read for specific paths
-    for path in &config.deny_read {
+    for path in config.deny_read.iter().chain(config.deny_read_globs.iter()) {
         let normalized = normalize_path_for_sandbox(path);
         if contains_glob_chars(&normalized) {
             let regex = glob_to_seatbelt_regex(&normalized);

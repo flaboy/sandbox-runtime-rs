@@ -12,6 +12,8 @@ pub struct FsReadRestrictionConfig {
     pub deny_paths: Vec<PathBuf>,
     /// Glob patterns denied for reading.
     pub deny_patterns: Vec<String>,
+    /// Glob patterns hidden or denied from directory listing.
+    pub deny_list_patterns: Vec<String>,
 }
 
 /// Processed filesystem write restriction configuration.
@@ -28,7 +30,9 @@ pub struct FsWriteRestrictionConfig {
 }
 
 /// Process filesystem configuration into normalized paths.
-pub fn process_fs_config(config: &FilesystemConfig) -> (FsReadRestrictionConfig, FsWriteRestrictionConfig) {
+pub fn process_fs_config(
+    config: &FilesystemConfig,
+) -> (FsReadRestrictionConfig, FsWriteRestrictionConfig) {
     let mut read_config = FsReadRestrictionConfig::default();
     let mut write_config = FsWriteRestrictionConfig::default();
 
@@ -40,6 +44,20 @@ pub fn process_fs_config(config: &FilesystemConfig) -> (FsReadRestrictionConfig,
         } else {
             read_config.deny_paths.push(PathBuf::from(normalized));
         }
+    }
+
+    // Process deny_read_globs
+    for pattern in &config.deny_read_globs {
+        read_config
+            .deny_patterns
+            .push(normalize_path_for_sandbox(pattern));
+    }
+
+    // Process deny_list_globs
+    for pattern in &config.deny_list_globs {
+        read_config
+            .deny_list_patterns
+            .push(normalize_path_for_sandbox(pattern));
     }
 
     // Process allow_write
@@ -83,4 +101,23 @@ pub fn is_path_denied(path: &Path, denied_paths: &[PathBuf]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_fs_config_merges_deny_read_globs_into_read_patterns() {
+        let config = FilesystemConfig {
+            deny_read_globs: vec!["/skills/**/*.md".to_string()],
+            deny_list_globs: vec!["/skills/**/*.md".to_string()],
+            ..Default::default()
+        };
+
+        let (read_config, _write_config) = process_fs_config(&config);
+
+        assert_eq!(read_config.deny_patterns, vec!["/skills/**/*.md"]);
+        assert_eq!(read_config.deny_list_patterns, vec!["/skills/**/*.md"]);
+    }
 }

@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::config::SandboxRuntimeConfig;
 use crate::error::SandboxError;
 use crate::sandbox::linux::bridge::SocatBridge;
-use crate::sandbox::linux::filesystem::{generate_bind_mounts, BindMount};
+use crate::sandbox::linux::filesystem::generate_bind_mounts;
 use crate::sandbox::linux::seccomp::{get_apply_seccomp_path, get_bpf_path};
 use crate::utils::quote;
 
@@ -96,11 +96,30 @@ pub fn generate_bwrap_command(
     bwrap_args.push(inner_command);
 
     // Join into a single command string
-    let wrapped = bwrap_args
+    let bwrap_command = bwrap_args
         .iter()
         .map(|s| quote(s))
         .collect::<Vec<_>>()
         .join(" ");
+
+    let cleanup_paths = mounts
+        .iter()
+        .filter(|mount| mount.cleanup_source)
+        .map(|mount| mount.source.display().to_string())
+        .collect::<Vec<_>>();
+    let wrapped = if cleanup_paths.is_empty() {
+        bwrap_command
+    } else {
+        let cleanup = cleanup_paths
+            .iter()
+            .map(|path| format!("rm -rf {}", quote(path)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "status=0; {} || status=$?; {}; exit $status",
+            bwrap_command, cleanup
+        )
+    };
 
     Ok((wrapped, warnings))
 }
@@ -155,16 +174,16 @@ fn build_inner_command(
             ));
         } else {
             // Seccomp not available, just run the command with warning
-            tracing::warn!(
-                "Seccomp not available - Unix socket creation will not be blocked"
-            );
+            tracing::warn!("Seccomp not available - Unix socket creation will not be blocked");
             let env_vars = generate_proxy_env_string(http_proxy_port, socks_proxy_port);
-            parts.push(format!("{} {} -c {}", env_vars, shell, quote(command)));
+            parts.push(env_vars);
+            parts.push(format!("{} -c {}", shell, quote(command)));
         }
     } else {
         // Unix sockets allowed, just run the command
         let env_vars = generate_proxy_env_string(http_proxy_port, socks_proxy_port);
-        parts.push(format!("{} {} -c {}", env_vars, shell, quote(command)));
+        parts.push(env_vars);
+        parts.push(format!("{} -c {}", shell, quote(command)));
     }
 
     Ok(parts.join("\n"))
@@ -242,6 +261,35 @@ mod tests {
             "generated command should be valid shell, stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn test_build_inner_command_exports_before_shell_command() {
+        let config = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                allow_all_unix_sockets: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let inner =
+            build_inner_command("printf ok", &config, None, None, 46807, 36713, "/bin/bash")
+                .expect("inner command should build");
+
+        assert!(inner.contains("\n/bin/bash -c "), "inner command: {inner}");
+
+        let output = Command::new("/bin/bash")
+            .args(["-c", &inner])
+            .output()
+            .expect("bash should be available");
+
+        assert!(
+            output.status.success(),
+            "generated command should execute, stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "ok");
     }
 
     #[test]
