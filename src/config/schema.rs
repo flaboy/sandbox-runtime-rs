@@ -78,9 +78,24 @@ pub struct FilesystemConfig {
     #[serde(default)]
     pub deny_write: Vec<String>,
 
+    /// Read-only directory aliases. Each bind exposes source at target and hides source.
+    #[serde(default)]
+    pub binds: Vec<FilesystemBindConfig>,
+
     /// Allow writes to .git/config.
     #[serde(default)]
     pub allow_git_config: Option<bool>,
+}
+
+/// Read-only filesystem bind alias.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesystemBindConfig {
+    /// Existing source directory outside the logical sandbox path.
+    pub source: String,
+
+    /// Logical target directory exposed inside the sandbox.
+    pub target: String,
 }
 
 /// Ripgrep configuration for dangerous file discovery on Linux.
@@ -169,13 +184,8 @@ pub const DANGEROUS_FILES: &[&str] = &[
 ];
 
 /// Dangerous directories that should never be writable.
-pub const DANGEROUS_DIRECTORIES: &[&str] = &[
-    ".git/hooks",
-    ".git",
-    ".vscode",
-    ".idea",
-    ".claude/commands",
-];
+pub const DANGEROUS_DIRECTORIES: &[&str] =
+    &[".git/hooks", ".git", ".vscode", ".idea", ".claude/commands"];
 
 impl SandboxRuntimeConfig {
     /// Validate the configuration.
@@ -291,7 +301,10 @@ mod tests {
 
         // Wildcard match
         assert!(matches_domain_pattern("api.example.com", "*.example.com"));
-        assert!(matches_domain_pattern("deep.api.example.com", "*.example.com"));
+        assert!(matches_domain_pattern(
+            "deep.api.example.com",
+            "*.example.com"
+        ));
         assert!(!matches_domain_pattern("example.com", "*.example.com"));
 
         // Case insensitivity

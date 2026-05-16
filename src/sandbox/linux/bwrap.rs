@@ -1,6 +1,7 @@
 //! Bubblewrap command generation for Linux sandbox.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::config::SandboxRuntimeConfig;
 use crate::error::SandboxError;
@@ -61,16 +62,17 @@ pub fn generate_bwrap_command(
     bwrap_args.push("/dev".to_string());
 
     // Add writable mounts
+    let mut created_target_dirs: HashSet<PathBuf> = HashSet::new();
     for mount in &mounts {
         if !mount.readonly {
-            bwrap_args.extend(mount.to_bwrap_args());
+            bwrap_args.extend(mount.to_bwrap_args_with_created_dirs(&mut created_target_dirs));
         }
     }
 
     // Add read-only (deny) mounts to override writable ones
     for mount in &mounts {
         if mount.readonly {
-            bwrap_args.extend(mount.to_bwrap_args());
+            bwrap_args.extend(mount.to_bwrap_args_with_created_dirs(&mut created_target_dirs));
         }
     }
 

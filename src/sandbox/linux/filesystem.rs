@@ -27,6 +27,8 @@ pub struct BindMount {
     pub dev_null: bool,
     /// Whether the source path is a generated temporary projection.
     pub cleanup_source: bool,
+    /// Whether the target directory should be created in the sandbox before binding.
+    pub create_target_dir: bool,
 }
 
 impl BindMount {
@@ -39,6 +41,7 @@ impl BindMount {
             readonly: true,
             dev_null: false,
             cleanup_source: false,
+            create_target_dir: false,
         }
     }
 
@@ -51,6 +54,7 @@ impl BindMount {
             readonly: false,
             dev_null: false,
             cleanup_source: false,
+            create_target_dir: false,
         }
     }
 
@@ -63,6 +67,43 @@ impl BindMount {
             readonly: true,
             dev_null: true,
             cleanup_source: false,
+            create_target_dir: false,
+        }
+    }
+
+    /// Create a read-only alias bind from source to target.
+    pub fn readonly_alias(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+            readonly: true,
+            dev_null: false,
+            cleanup_source: false,
+            create_target_dir: true,
+        }
+    }
+
+    /// Create a read-only alias bind from a generated projection to target.
+    pub fn projected_alias(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+            readonly: true,
+            dev_null: false,
+            cleanup_source: true,
+            create_target_dir: true,
+        }
+    }
+
+    /// Create a read-only mount of an empty projection over a source path.
+    pub fn hide_source(source: impl Into<PathBuf>, hidden_root: impl Into<PathBuf>) -> Self {
+        Self {
+            source: hidden_root.into(),
+            target: source.into(),
+            readonly: true,
+            dev_null: false,
+            cleanup_source: true,
+            create_target_dir: false,
         }
     }
 
@@ -74,31 +115,69 @@ impl BindMount {
             readonly: true,
             dev_null: false,
             cleanup_source: true,
+            create_target_dir: false,
         }
     }
 
     /// Convert to bwrap arguments.
     pub fn to_bwrap_args(&self) -> Vec<String> {
-        if self.dev_null {
-            vec![
-                "--ro-bind".to_string(),
-                "/dev/null".to_string(),
-                self.target.display().to_string(),
-            ]
-        } else if self.readonly {
-            vec![
-                "--ro-bind".to_string(),
-                self.source.display().to_string(),
-                self.target.display().to_string(),
-            ]
-        } else {
-            vec![
-                "--bind".to_string(),
-                self.source.display().to_string(),
-                self.target.display().to_string(),
-            ]
-        }
+        let mut created_target_dirs = HashSet::new();
+        self.to_bwrap_args_with_created_dirs(&mut created_target_dirs)
     }
+
+    /// Convert to bwrap arguments, deduplicating generated target directories.
+    pub fn to_bwrap_args_with_created_dirs(
+        &self,
+        created_target_dirs: &mut HashSet<PathBuf>,
+    ) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.create_target_dir {
+            args.extend(target_dir_args(&self.target, created_target_dirs));
+        }
+        if self.dev_null {
+            args.push("--ro-bind".to_string());
+            args.push("/dev/null".to_string());
+            args.push(self.target.display().to_string());
+        } else if self.readonly {
+            args.push("--ro-bind".to_string());
+            args.push(self.source.display().to_string());
+            args.push(self.target.display().to_string());
+        } else {
+            args.push("--bind".to_string());
+            args.push(self.source.display().to_string());
+            args.push(self.target.display().to_string());
+        }
+        args
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AliasBind {
+    source: PathBuf,
+    target: PathBuf,
+}
+
+fn target_dir_args(target: &Path, created_target_dirs: &mut HashSet<PathBuf>) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = PathBuf::new();
+    let mut depth = 0usize;
+    for component in target.components() {
+        current.push(component.as_os_str());
+        if current == Path::new("/") {
+            continue;
+        }
+        depth += 1;
+        if !created_target_dirs.insert(current.clone()) {
+            continue;
+        }
+        if depth == 1 {
+            args.push("--tmpfs".to_string());
+        } else {
+            args.push("--dir".to_string());
+        }
+        args.push(current.display().to_string());
+    }
+    args
 }
 
 /// Generate bind mounts for the filesystem configuration.
@@ -185,9 +264,12 @@ pub fn generate_bind_mounts(
         }
     }
 
-    let projection_mounts = generate_projection_mounts(config, &mut warnings)?;
+    let alias_binds = normalize_alias_binds(config)?;
+    let bind_mounts = generate_alias_bind_mounts(config, &alias_binds)?;
+    let projection_mounts = generate_projection_mounts(config, &mut warnings, &alias_binds)?;
 
     // Generate mounts
+    mounts.extend(bind_mounts);
     mounts.extend(projection_mounts);
 
     // First, add writable mounts
@@ -205,6 +287,9 @@ pub fn generate_bind_mounts(
 
     // Then, add deny mounts (these override writable mounts)
     for path in &deny_paths {
+        if is_alias_target_path(path, &alias_binds) {
+            continue;
+        }
         if path.exists() {
             mounts.push(BindMount::readonly(path.clone()));
         } else {
@@ -216,13 +301,88 @@ pub fn generate_bind_mounts(
     Ok((mounts, warnings))
 }
 
+fn normalize_alias_binds(config: &FilesystemConfig) -> Result<Vec<AliasBind>, SandboxError> {
+    let mut aliases = Vec::new();
+    for bind in &config.binds {
+        let source = normalize_bind_path(&bind.source, "source")?;
+        let target = normalize_bind_path(&bind.target, "target")?;
+        if source == target {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Filesystem bind source and target must differ: {}",
+                source.display()
+            )));
+        }
+        if !source.is_dir() {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Filesystem bind source must be an existing directory: {}",
+                source.display()
+            )));
+        }
+        aliases.push(AliasBind { source, target });
+    }
+    Ok(aliases)
+}
+
+fn generate_alias_bind_mounts(
+    config: &FilesystemConfig,
+    aliases: &[AliasBind],
+) -> Result<Vec<BindMount>, SandboxError> {
+    let mut mounts = Vec::new();
+    let patterns = filesystem_projection_patterns(config);
+    for alias in aliases {
+        let translated_patterns = translate_alias_patterns(&patterns, alias)?;
+        if translated_patterns.is_empty() {
+            mounts.push(BindMount::readonly_alias(
+                alias.source.clone(),
+                alias.target.clone(),
+            ));
+        } else {
+            let projection_root = create_projection_root(&alias.source, &translated_patterns)?;
+            mounts.push(BindMount::projected_alias(
+                projection_root,
+                alias.target.clone(),
+            ));
+        }
+        mounts.push(BindMount::hide_source(
+            alias.source.clone(),
+            create_empty_projection_root()?,
+        ));
+    }
+    Ok(mounts)
+}
+
+fn normalize_bind_path(raw: &str, field: &str) -> Result<PathBuf, SandboxError> {
+    if raw.trim().is_empty() {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "Filesystem bind {field} is required"
+        )));
+    }
+    if contains_glob_chars(raw) {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "Filesystem bind {field} must not contain glob characters: {raw}"
+        )));
+    }
+    let normalized = normalize_path_for_sandbox(raw);
+    let path = PathBuf::from(&normalized);
+    if !path.is_absolute() {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "Filesystem bind {field} must be absolute: {raw}"
+        )));
+    }
+    if path == Path::new("/") {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "Filesystem bind {field} must not be /"
+        )));
+    }
+    Ok(path)
+}
+
 fn generate_projection_mounts(
     config: &FilesystemConfig,
     warnings: &mut Vec<String>,
+    aliases: &[AliasBind],
 ) -> Result<Vec<BindMount>, SandboxError> {
-    let mut patterns = Vec::new();
-    patterns.extend(config.deny_read_globs.iter().cloned());
-    patterns.extend(config.deny_list_globs.iter().cloned());
+    let patterns = filesystem_projection_patterns(config);
     if patterns.is_empty() {
         return Ok(Vec::new());
     }
@@ -230,6 +390,12 @@ fn generate_projection_mounts(
     let mut grouped_patterns: BTreeMap<PathBuf, Vec<glob::Pattern>> = BTreeMap::new();
     for pattern in patterns {
         let normalized = normalize_path_for_sandbox(&pattern);
+        if aliases
+            .iter()
+            .any(|alias| pattern_targets_alias(&normalized, &alias.target))
+        {
+            continue;
+        }
         let Some(root) = glob_projection_root(&normalized) else {
             warnings.push(format!(
                 "Glob pattern '{}' is too broad for Linux projection; ignoring",
@@ -262,6 +428,56 @@ fn generate_projection_mounts(
     Ok(mounts)
 }
 
+fn filesystem_projection_patterns(config: &FilesystemConfig) -> Vec<String> {
+    let mut patterns = Vec::new();
+    patterns.extend(config.deny_read_globs.iter().cloned());
+    patterns.extend(config.deny_list_globs.iter().cloned());
+    patterns
+}
+
+fn translate_alias_patterns(
+    patterns: &[String],
+    alias: &AliasBind,
+) -> Result<Vec<glob::Pattern>, SandboxError> {
+    let mut out = Vec::new();
+    for pattern in patterns {
+        let normalized = normalize_path_for_sandbox(pattern);
+        let Some(translated) = rewrite_alias_pattern(&normalized, &alias.target, &alias.source)
+        else {
+            continue;
+        };
+        let compiled = glob::Pattern::new(&translated).map_err(|err| {
+            SandboxError::ExecutionFailed(format!(
+                "Invalid filesystem glob pattern '{}': {}",
+                pattern, err
+            ))
+        })?;
+        out.push(compiled);
+    }
+    Ok(out)
+}
+
+fn rewrite_alias_pattern(pattern: &str, target: &Path, source: &Path) -> Option<String> {
+    if !pattern_targets_alias(pattern, target) {
+        return None;
+    }
+    let target = target.display().to_string();
+    let source = source.display().to_string();
+    if pattern == target {
+        return Some(source);
+    }
+    Some(format!("{}{}", source, &pattern[target.len()..]))
+}
+
+fn pattern_targets_alias(pattern: &str, target: &Path) -> bool {
+    let target = target.display().to_string();
+    pattern == target || pattern.starts_with(&format!("{target}/"))
+}
+
+fn is_alias_target_path(path: &Path, aliases: &[AliasBind]) -> bool {
+    aliases.iter().any(|alias| path.starts_with(&alias.target))
+}
+
 fn glob_projection_root(pattern: &str) -> Option<PathBuf> {
     let path = Path::new(pattern);
     let mut root = PathBuf::new();
@@ -292,6 +508,17 @@ fn create_projection_root(
     }
     fs::create_dir_all(&projection_root)?;
     copy_projection_tree(source_root, source_root, &projection_root, denied_patterns)?;
+    Ok(projection_root)
+}
+
+fn create_empty_projection_root() -> Result<PathBuf, SandboxError> {
+    let id = PROJECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let projection_root =
+        std::env::temp_dir().join(format!("srt-hidden-{}-{}", std::process::id(), id));
+    if projection_root.exists() {
+        fs::remove_dir_all(&projection_root)?;
+    }
+    fs::create_dir_all(&projection_root)?;
     Ok(projection_root)
 }
 
