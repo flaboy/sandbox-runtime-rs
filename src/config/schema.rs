@@ -96,6 +96,10 @@ pub struct FilesystemBindConfig {
 
     /// Logical target directory exposed inside the sandbox.
     pub target: String,
+
+    /// Whether the alias is writable. Defaults to false.
+    #[serde(default)]
+    pub writable: Option<bool>,
 }
 
 /// Ripgrep configuration for dangerous file discovery on Linux.

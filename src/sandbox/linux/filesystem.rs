@@ -73,10 +73,19 @@ impl BindMount {
 
     /// Create a read-only alias bind from source to target.
     pub fn readonly_alias(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
+        Self::alias(source, target, false)
+    }
+
+    /// Create an alias bind from source to target.
+    pub fn alias(
+        source: impl Into<PathBuf>,
+        target: impl Into<PathBuf>,
+        writable: bool,
+    ) -> Self {
         Self {
             source: source.into(),
             target: target.into(),
-            readonly: true,
+            readonly: !writable,
             dev_null: false,
             cleanup_source: false,
             create_target_dir: true,
@@ -155,6 +164,7 @@ impl BindMount {
 struct AliasBind {
     source: PathBuf,
     target: PathBuf,
+    writable: bool,
 }
 
 fn target_dir_args(target: &Path, created_target_dirs: &mut HashSet<PathBuf>) -> Vec<String> {
@@ -318,7 +328,11 @@ fn normalize_alias_binds(config: &FilesystemConfig) -> Result<Vec<AliasBind>, Sa
                 source.display()
             )));
         }
-        aliases.push(AliasBind { source, target });
+        aliases.push(AliasBind {
+            source,
+            target,
+            writable: bind.writable.unwrap_or(false),
+        });
     }
     Ok(aliases)
 }
@@ -332,11 +346,19 @@ fn generate_alias_bind_mounts(
     for alias in aliases {
         let translated_patterns = translate_alias_patterns(&patterns, alias)?;
         if translated_patterns.is_empty() {
-            mounts.push(BindMount::readonly_alias(
+            mounts.push(BindMount::alias(
                 alias.source.clone(),
                 alias.target.clone(),
+                alias.writable,
             ));
         } else {
+            if alias.writable {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "Writable filesystem bind cannot use read/list projection rules: {} -> {}",
+                    alias.source.display(),
+                    alias.target.display()
+                )));
+            }
             let projection_root = create_projection_root(&alias.source, &translated_patterns)?;
             mounts.push(BindMount::projected_alias(
                 projection_root,
