@@ -108,7 +108,12 @@ pub fn generate_socket_path(prefix: &str) -> PathBuf {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let suffix: u32 = rng.gen();
-    PathBuf::from(format!("/tmp/{}-{}-{:08x}.sock", prefix, std::process::id(), suffix))
+    PathBuf::from(format!(
+        "/tmp/{}-{}-{:08x}.sock",
+        prefix,
+        std::process::id(),
+        suffix
+    ))
 }
 
 #[cfg(test)]

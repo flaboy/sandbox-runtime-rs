@@ -6,7 +6,7 @@ use crate::config::{
     FilesystemConfig, NetworkConfig, SandboxRuntimeConfig, DANGEROUS_DIRECTORIES, DANGEROUS_FILES,
 };
 use crate::sandbox::macos::glob::glob_to_seatbelt_regex;
-use crate::utils::{normalize_path_for_sandbox, contains_glob_chars};
+use crate::utils::{contains_glob_chars, normalize_path_for_sandbox};
 
 /// Session suffix for log tagging (generated once per session).
 static SESSION_SUFFIX: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
@@ -75,7 +75,12 @@ pub fn generate_profile(
 
     // Network rules
     profile.push_str("; Network\n");
-    generate_network_rules(&mut profile, &config.network, http_proxy_port, socks_proxy_port);
+    generate_network_rules(
+        &mut profile,
+        &config.network,
+        http_proxy_port,
+        socks_proxy_port,
+    );
     profile.push('\n');
 
     // Filesystem rules

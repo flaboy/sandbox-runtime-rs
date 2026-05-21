@@ -44,7 +44,10 @@ fn get_local_seccomp_paths(filename: &str) -> Vec<PathBuf> {
 
     // Fallback: check cargo install location
     if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(format!(".cargo/share/sandbox-runtime/seccomp/{}/{}", arch, filename)));
+        paths.push(home.join(format!(
+            ".cargo/share/sandbox-runtime/seccomp/{}/{}",
+            arch, filename
+        )));
     }
 
     paths
@@ -56,7 +59,10 @@ fn find_bpf_path(explicit_path: Option<&str>) -> Option<PathBuf> {
     if let Some(path_str) = explicit_path {
         let p = PathBuf::from(path_str);
         if p.exists() {
-            tracing::debug!("[SeccompFilter] Using BPF filter from explicit path: {:?}", p);
+            tracing::debug!(
+                "[SeccompFilter] Using BPF filter from explicit path: {:?}",
+                p
+            );
             return Some(p);
         }
         tracing::debug!(
@@ -181,7 +187,9 @@ pub fn get_apply_seccomp_path(config: Option<&SeccompConfig>) -> Result<PathBuf,
 
     // Check cache first
     {
-        let cache = APPLY_SECCOMP_PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = APPLY_SECCOMP_PATH_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = cache.get(&cache_key) {
             return cached.clone().ok_or_else(|| {
                 SandboxError::Seccomp(format!(
@@ -195,7 +203,9 @@ pub fn get_apply_seccomp_path(config: Option<&SeccompConfig>) -> Result<PathBuf,
     // Find path and cache result
     let result = find_apply_seccomp_path(explicit_path);
     {
-        let mut cache = APPLY_SECCOMP_PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = APPLY_SECCOMP_PATH_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.insert(cache_key, result.clone());
     }
 

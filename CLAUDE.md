@@ -56,7 +56,19 @@ OS-level sandboxing tool enforcing filesystem and network restrictions without c
 **Linux** (`src/sandbox/linux/`):
 - Uses bubblewrap + seccomp
 - `bwrap.rs`: generates bwrap command with `--unshare-net`, bind mounts
+- `filesystem.rs`: maps filesystem policy to one explicit mount operation path
 - `bridge.rs`: socat bridges for proxy access inside namespace
+
+Linux filesystem glob filtering contract:
+
+- Read/list glob filtering is supported only for read-only `filesystem.binds` aliases.
+- `denyReadGlobs` and `denyListGlobs` must match exactly after normalization.
+- Every denied read/list glob must target exactly one alias target.
+- Denied read/list globs must target paths below the alias root, not the alias root itself.
+- Filtered alias source trees must not contain symlinks.
+- `allowWrite` and `denyWrite` glob patterns fail on Linux; they are not ignored.
+- Filtered aliases are built from skeleton directories plus direct read-only file binds for allowed files.
+- Linux must not reintroduce copy projection trees or fallback projection paths for filtered aliases.
 
 ### Key Modules
 

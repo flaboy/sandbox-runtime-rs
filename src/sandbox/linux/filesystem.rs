@@ -1,6 +1,6 @@
 //! Filesystem bind mount generation for bubblewrap.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,16 +15,22 @@ use crate::utils::{
 static PROJECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Bind mount specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindMountOp {
+    ReadOnlyBind,
+    WritableBind,
+    DevNullBind,
+    Tmpfs,
+}
+
 #[derive(Debug, Clone)]
 pub struct BindMount {
     /// Source path on host.
     pub source: PathBuf,
     /// Target path in sandbox (usually same as source).
     pub target: PathBuf,
-    /// Whether the mount is read-only.
-    pub readonly: bool,
-    /// Whether to create the path with dev-null if it doesn't exist.
-    pub dev_null: bool,
+    /// Bubblewrap mount operation.
+    pub op: BindMountOp,
     /// Whether the source path is a generated temporary projection.
     pub cleanup_source: bool,
     /// Whether the target directory should be created in the sandbox before binding.
@@ -38,8 +44,7 @@ impl BindMount {
         Self {
             source: path.clone(),
             target: path,
-            readonly: true,
-            dev_null: false,
+            op: BindMountOp::ReadOnlyBind,
             cleanup_source: false,
             create_target_dir: false,
         }
@@ -51,8 +56,7 @@ impl BindMount {
         Self {
             source: path.clone(),
             target: path,
-            readonly: false,
-            dev_null: false,
+            op: BindMountOp::WritableBind,
             cleanup_source: false,
             create_target_dir: false,
         }
@@ -64,8 +68,7 @@ impl BindMount {
         Self {
             source: PathBuf::from("/dev/null"),
             target: path,
-            readonly: true,
-            dev_null: true,
+            op: BindMountOp::DevNullBind,
             cleanup_source: false,
             create_target_dir: false,
         }
@@ -77,55 +80,56 @@ impl BindMount {
     }
 
     /// Create an alias bind from source to target.
-    pub fn alias(
-        source: impl Into<PathBuf>,
-        target: impl Into<PathBuf>,
-        writable: bool,
-    ) -> Self {
+    pub fn alias(source: impl Into<PathBuf>, target: impl Into<PathBuf>, writable: bool) -> Self {
         Self {
             source: source.into(),
             target: target.into(),
-            readonly: !writable,
-            dev_null: false,
+            op: if writable {
+                BindMountOp::WritableBind
+            } else {
+                BindMountOp::ReadOnlyBind
+            },
             cleanup_source: false,
             create_target_dir: true,
         }
     }
 
-    /// Create a read-only alias bind from a generated projection to target.
-    pub fn projected_alias(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
+    /// Create a filtered alias root mount.
+    pub fn filtered_alias_root(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
         Self {
             source: source.into(),
             target: target.into(),
-            readonly: true,
-            dev_null: false,
+            op: BindMountOp::ReadOnlyBind,
             cleanup_source: true,
             create_target_dir: true,
         }
     }
 
-    /// Create a read-only mount of an empty projection over a source path.
-    pub fn hide_source(source: impl Into<PathBuf>, hidden_root: impl Into<PathBuf>) -> Self {
+    /// Create a file bind inside a filtered alias root.
+    pub fn filtered_alias_file(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
         Self {
-            source: hidden_root.into(),
-            target: source.into(),
-            readonly: true,
-            dev_null: false,
-            cleanup_source: true,
+            source: source.into(),
+            target: target.into(),
+            op: BindMountOp::ReadOnlyBind,
+            cleanup_source: false,
             create_target_dir: false,
         }
     }
 
-    /// Create a read-only projection mount that should be cleaned up after execution.
-    pub fn projection(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
+    /// Hide a source path with an empty tmpfs mount.
+    pub fn hide_source_tmpfs(target: impl Into<PathBuf>) -> Self {
+        let target = target.into();
         Self {
-            source: source.into(),
-            target: target.into(),
-            readonly: true,
-            dev_null: false,
-            cleanup_source: true,
+            source: target.clone(),
+            target,
+            op: BindMountOp::Tmpfs,
+            cleanup_source: false,
             create_target_dir: false,
         }
+    }
+
+    pub fn is_writable_bind(&self) -> bool {
+        self.op == BindMountOp::WritableBind
     }
 
     /// Convert to bwrap arguments.
@@ -143,18 +147,26 @@ impl BindMount {
         if self.create_target_dir {
             args.extend(target_dir_args(&self.target, created_target_dirs));
         }
-        if self.dev_null {
-            args.push("--ro-bind".to_string());
-            args.push("/dev/null".to_string());
-            args.push(self.target.display().to_string());
-        } else if self.readonly {
-            args.push("--ro-bind".to_string());
-            args.push(self.source.display().to_string());
-            args.push(self.target.display().to_string());
-        } else {
-            args.push("--bind".to_string());
-            args.push(self.source.display().to_string());
-            args.push(self.target.display().to_string());
+        match self.op {
+            BindMountOp::ReadOnlyBind => {
+                args.push("--ro-bind".to_string());
+                args.push(self.source.display().to_string());
+                args.push(self.target.display().to_string());
+            }
+            BindMountOp::WritableBind => {
+                args.push("--bind".to_string());
+                args.push(self.source.display().to_string());
+                args.push(self.target.display().to_string());
+            }
+            BindMountOp::DevNullBind => {
+                args.push("--ro-bind".to_string());
+                args.push("/dev/null".to_string());
+                args.push(self.target.display().to_string());
+            }
+            BindMountOp::Tmpfs => {
+                args.push("--tmpfs".to_string());
+                args.push(self.target.display().to_string());
+            }
         }
         args
     }
@@ -165,6 +177,12 @@ struct AliasBind {
     source: PathBuf,
     target: PathBuf,
     writable: bool,
+}
+
+#[derive(Debug)]
+struct FilteredAliasPlan {
+    skeleton_root: PathBuf,
+    file_mounts: Vec<BindMount>,
 }
 
 fn target_dir_args(target: &Path, created_target_dirs: &mut HashSet<PathBuf>) -> Vec<String> {
@@ -205,11 +223,9 @@ pub fn generate_bind_mounts(
     for path in &config.allow_write {
         // Handle glob patterns
         if contains_glob_chars(path) {
-            warnings.push(format!(
-                "Glob pattern '{}' is not supported on Linux; ignoring",
-                path
-            ));
-            continue;
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Linux allowWrite glob patterns are not supported: {path}"
+            )));
         }
 
         let normalized = normalize_path_for_sandbox(path);
@@ -226,11 +242,9 @@ pub fn generate_bind_mounts(
     let mut deny_paths: HashSet<PathBuf> = HashSet::new();
     for path in &config.deny_write {
         if contains_glob_chars(path) {
-            warnings.push(format!(
-                "Glob pattern '{}' is not supported on Linux; ignoring",
-                path
-            ));
-            continue;
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Linux denyWrite glob patterns are not supported: {path}"
+            )));
         }
 
         let normalized = normalize_path_for_sandbox(path);
@@ -275,12 +289,11 @@ pub fn generate_bind_mounts(
     }
 
     let alias_binds = normalize_alias_binds(config)?;
+    validate_linux_glob_filter_contract(config, &alias_binds)?;
     let bind_mounts = generate_alias_bind_mounts(config, &alias_binds)?;
-    let projection_mounts = generate_projection_mounts(config, &mut warnings, &alias_binds)?;
 
     // Generate mounts
     mounts.extend(bind_mounts);
-    mounts.extend(projection_mounts);
 
     // First, add writable mounts
     for path in &writable_paths {
@@ -354,23 +367,81 @@ fn generate_alias_bind_mounts(
         } else {
             if alias.writable {
                 return Err(SandboxError::ExecutionFailed(format!(
-                    "Writable filesystem bind cannot use read/list projection rules: {} -> {}",
+                    "Writable filesystem bind cannot use read/list glob filtering: {} -> {}",
                     alias.source.display(),
                     alias.target.display()
                 )));
             }
-            let projection_root = create_projection_root(&alias.source, &translated_patterns)?;
-            mounts.push(BindMount::projected_alias(
-                projection_root,
+            let plan =
+                create_filtered_alias_plan(&alias.source, &alias.target, &translated_patterns)?;
+            mounts.push(BindMount::filtered_alias_root(
+                plan.skeleton_root,
                 alias.target.clone(),
             ));
+            mounts.extend(plan.file_mounts);
         }
-        mounts.push(BindMount::hide_source(
-            alias.source.clone(),
-            create_empty_projection_root()?,
-        ));
+        mounts.push(BindMount::hide_source_tmpfs(alias.source.clone()));
     }
     Ok(mounts)
+}
+
+fn validate_linux_glob_filter_contract(
+    config: &FilesystemConfig,
+    aliases: &[AliasBind],
+) -> Result<(), SandboxError> {
+    let read_globs = config
+        .deny_read_globs
+        .iter()
+        .map(|pattern| normalize_path_for_sandbox(pattern))
+        .collect::<Vec<_>>();
+    let list_globs = config
+        .deny_list_globs
+        .iter()
+        .map(|pattern| normalize_path_for_sandbox(pattern))
+        .collect::<Vec<_>>();
+
+    if read_globs != list_globs {
+        return Err(SandboxError::ExecutionFailed(
+            "Linux read/list glob filtering requires identical denyReadGlobs and denyListGlobs"
+                .to_string(),
+        ));
+    }
+
+    for pattern in read_globs {
+        let matching_aliases = aliases
+            .iter()
+            .filter(|alias| pattern_targets_alias(&pattern, &alias.target))
+            .collect::<Vec<_>>();
+
+        match matching_aliases.as_slice() {
+            [] => {
+                return Err(SandboxError::ExecutionFailed(
+                    "Linux read/list glob filtering is only supported for filesystem.binds aliases"
+                        .to_string(),
+                ));
+            }
+            [alias] if alias.writable => {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "Writable filesystem bind cannot use read/list glob filtering: {} -> {}",
+                    alias.source.display(),
+                    alias.target.display()
+                )));
+            }
+            [alias] if pattern == alias.target.display().to_string() => {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "Linux read/list glob filtering cannot target alias root exactly: {pattern}"
+                )));
+            }
+            [_] => {}
+            _ => {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "Linux read/list glob pattern targets multiple filesystem.binds aliases: {pattern}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_bind_path(raw: &str, field: &str) -> Result<PathBuf, SandboxError> {
@@ -397,57 +468,6 @@ fn normalize_bind_path(raw: &str, field: &str) -> Result<PathBuf, SandboxError> 
         )));
     }
     Ok(path)
-}
-
-fn generate_projection_mounts(
-    config: &FilesystemConfig,
-    warnings: &mut Vec<String>,
-    aliases: &[AliasBind],
-) -> Result<Vec<BindMount>, SandboxError> {
-    let patterns = filesystem_projection_patterns(config);
-    if patterns.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut grouped_patterns: BTreeMap<PathBuf, Vec<glob::Pattern>> = BTreeMap::new();
-    for pattern in patterns {
-        let normalized = normalize_path_for_sandbox(&pattern);
-        if aliases
-            .iter()
-            .any(|alias| pattern_targets_alias(&normalized, &alias.target))
-        {
-            continue;
-        }
-        let Some(root) = glob_projection_root(&normalized) else {
-            warnings.push(format!(
-                "Glob pattern '{}' is too broad for Linux projection; ignoring",
-                pattern
-            ));
-            continue;
-        };
-        if !root.is_dir() {
-            warnings.push(format!(
-                "Glob pattern '{}' projection root '{}' does not exist or is not a directory",
-                pattern,
-                root.display()
-            ));
-            continue;
-        }
-        let compiled = glob::Pattern::new(&normalized).map_err(|err| {
-            SandboxError::ExecutionFailed(format!(
-                "Invalid filesystem glob pattern '{}': {}",
-                pattern, err
-            ))
-        })?;
-        grouped_patterns.entry(root).or_default().push(compiled);
-    }
-
-    let mut mounts = Vec::new();
-    for (root, compiled_patterns) in grouped_patterns {
-        let projection_root = create_projection_root(&root, &compiled_patterns)?;
-        mounts.push(BindMount::projection(projection_root, root));
-    }
-    Ok(mounts)
 }
 
 fn filesystem_projection_patterns(config: &FilesystemConfig) -> Vec<String> {
@@ -500,55 +520,59 @@ fn is_alias_target_path(path: &Path, aliases: &[AliasBind]) -> bool {
     aliases.iter().any(|alias| path.starts_with(&alias.target))
 }
 
-fn glob_projection_root(pattern: &str) -> Option<PathBuf> {
-    let path = Path::new(pattern);
-    let mut root = PathBuf::new();
-    for component in path.components() {
-        let component_text = component.as_os_str().to_string_lossy();
-        if contains_glob_chars(&component_text) {
-            break;
-        }
-        root.push(component.as_os_str());
-    }
-
-    if root.as_os_str().is_empty() || root == Path::new("/") {
-        None
-    } else {
-        Some(root)
-    }
-}
-
-fn create_projection_root(
+fn create_filtered_alias_plan(
     source_root: &Path,
+    target_root: &Path,
     denied_patterns: &[glob::Pattern],
-) -> Result<PathBuf, SandboxError> {
+) -> Result<FilteredAliasPlan, SandboxError> {
+    reject_filtered_alias_symlinks(source_root)?;
     let id = PROJECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let projection_root =
-        std::env::temp_dir().join(format!("srt-projection-{}-{}", std::process::id(), id));
-    if projection_root.exists() {
-        fs::remove_dir_all(&projection_root)?;
+    let skeleton_root =
+        std::env::temp_dir().join(format!("srt-filtered-alias-{}-{}", std::process::id(), id));
+    if skeleton_root.exists() {
+        fs::remove_dir_all(&skeleton_root)?;
     }
-    fs::create_dir_all(&projection_root)?;
-    copy_projection_tree(source_root, source_root, &projection_root, denied_patterns)?;
-    Ok(projection_root)
+    fs::create_dir_all(&skeleton_root)?;
+    let mut file_mounts = Vec::new();
+    build_filtered_alias_tree(
+        source_root,
+        source_root,
+        target_root,
+        &skeleton_root,
+        denied_patterns,
+        &mut file_mounts,
+    )?;
+    Ok(FilteredAliasPlan {
+        skeleton_root,
+        file_mounts,
+    })
 }
 
-fn create_empty_projection_root() -> Result<PathBuf, SandboxError> {
-    let id = PROJECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let projection_root =
-        std::env::temp_dir().join(format!("srt-hidden-{}-{}", std::process::id(), id));
-    if projection_root.exists() {
-        fs::remove_dir_all(&projection_root)?;
+fn reject_filtered_alias_symlinks(current: &Path) -> Result<(), SandboxError> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Filtered filesystem bind does not support symlinks: {}",
+                source_path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            reject_filtered_alias_symlinks(&source_path)?;
+        }
     }
-    fs::create_dir_all(&projection_root)?;
-    Ok(projection_root)
+    Ok(())
 }
 
-fn copy_projection_tree(
+fn build_filtered_alias_tree(
     source_root: &Path,
     current: &Path,
     target_root: &Path,
+    skeleton_root: &Path,
     denied_patterns: &[glob::Pattern],
+    file_mounts: &mut Vec<BindMount>,
 ) -> Result<(), SandboxError> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
@@ -567,23 +591,32 @@ fn copy_projection_tree(
                 err
             ))
         })?;
-        let target_path = target_root.join(relative);
+        let skeleton_path = skeleton_root.join(relative);
+        let sandbox_path = target_root.join(relative);
         let metadata = fs::symlink_metadata(&source_path)?;
         if metadata.is_dir() {
-            fs::create_dir_all(&target_path)?;
-            fs::set_permissions(&target_path, metadata.permissions())?;
-            copy_projection_tree(source_root, &source_path, target_root, denied_patterns)?;
+            fs::create_dir_all(&skeleton_path)?;
+            fs::set_permissions(&skeleton_path, metadata.permissions())?;
+            build_filtered_alias_tree(
+                source_root,
+                &source_path,
+                target_root,
+                skeleton_root,
+                denied_patterns,
+                file_mounts,
+            )?;
         } else if metadata.file_type().is_symlink() {
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(fs::read_link(&source_path)?, &target_path)?;
-            }
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Filtered filesystem bind does not support symlinks: {}",
+                source_path.display()
+            )));
         } else if metadata.is_file() {
-            if let Some(parent) = target_path.parent() {
+            if let Some(parent) = skeleton_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&source_path, &target_path)?;
-            fs::set_permissions(&target_path, metadata.permissions())?;
+            fs::File::create(&skeleton_path)?;
+            fs::set_permissions(&skeleton_path, metadata.permissions())?;
+            file_mounts.push(BindMount::filtered_alias_file(source_path, sandbox_path));
         }
     }
     Ok(())
@@ -609,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_bind_mounts_projects_denied_markdown_globs() {
+    fn test_generate_bind_mounts_rejects_non_alias_denied_markdown_globs() {
         let temp = tempfile::tempdir().unwrap();
         let skill_root = temp.path().join("skills").join("triage");
         std::fs::create_dir_all(skill_root.join("references")).unwrap();
@@ -624,24 +657,222 @@ mod tests {
             ..Default::default()
         };
 
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "Linux read/list glob filtering is only supported for filesystem.binds aliases"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_filtered_alias_bind_does_not_create_copy_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("mounted").join("skills").join("triage");
+        std::fs::create_dir_all(source_root.join("scripts")).unwrap();
+        std::fs::create_dir_all(source_root.join("references")).unwrap();
+        std::fs::write(source_root.join("SKILL.md"), "hidden skill doc").unwrap();
+        std::fs::write(
+            source_root.join("references").join("policy.md"),
+            "hidden policy",
+        )
+        .unwrap();
+        std::fs::write(
+            source_root.join("scripts").join("classify.js"),
+            "console.log('allowed');",
+        )
+        .unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_list_globs: vec!["/skills/triage/**/*.md".to_string()],
+            ..Default::default()
+        };
+
         let (mounts, warnings) = generate_bind_mounts(&config, temp.path(), None, None).unwrap();
 
         assert!(warnings.is_empty(), "{warnings:?}");
-        let projection = mounts
-            .iter()
-            .find(|mount| mount.cleanup_source && mount.target == skill_root)
-            .expect("projection mount should be generated");
-        assert!(projection
-            .source
-            .join("scripts")
-            .join("classify.js")
-            .exists());
-        assert!(!projection.source.join("SKILL.md").exists());
-        assert!(!projection
-            .source
-            .join("references")
-            .join("policy.md")
-            .exists());
-        std::fs::remove_dir_all(&projection.source).unwrap();
+        assert!(
+            mounts.iter().all(|mount| !mount
+                .source
+                .display()
+                .to_string()
+                .contains("srt-projection-")),
+            "filtered alias must not use copy projection mounts: {mounts:?}"
+        );
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount.target == Path::new("/skills/triage/scripts/classify.js")),
+            "allowed file should be mounted directly into filtered alias"
+        );
+        assert!(
+            mounts
+                .iter()
+                .all(|mount| mount.target != Path::new("/skills/triage/SKILL.md")),
+            "denied markdown file must not be mounted"
+        );
+    }
+
+    #[test]
+    fn test_filtered_alias_rejects_asymmetric_read_and_list_globs() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_list_globs: vec![],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "Linux read/list glob filtering requires identical denyReadGlobs and denyListGlobs"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_filtered_alias_rejects_non_alias_globs() {
+        let temp = tempfile::tempdir().unwrap();
+        let loose_root = temp.path().join("loose");
+        std::fs::create_dir_all(&loose_root).unwrap();
+
+        let pattern = format!("{}/**/*.md", loose_root.display());
+        let config = FilesystemConfig {
+            deny_read_globs: vec![pattern.clone()],
+            deny_list_globs: vec![pattern],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "Linux read/list glob filtering is only supported for filesystem.binds aliases"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_linux_allow_write_glob_fastfails() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = FilesystemConfig {
+            allow_write: vec!["/tmp/**/*.tmp".to_string()],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Linux allowWrite glob patterns are not supported: /tmp/**/*.tmp"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_linux_deny_write_glob_fastfails() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = FilesystemConfig {
+            deny_write: vec!["/tmp/**/*.tmp".to_string()],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Linux denyWrite glob patterns are not supported: /tmp/**/*.tmp"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_filtered_alias_rejects_writable_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(true),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_list_globs: vec!["/skills/triage/**/*.md".to_string()],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Writable filesystem bind cannot use read/list glob filtering"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_filtered_alias_rejects_exact_alias_root_glob() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage".to_string()],
+            deny_list_globs: vec!["/skills/triage".to_string()],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Linux read/list glob filtering cannot target alias root exactly"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_filtered_alias_rejects_denied_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", source_root.join("hidden.md")).unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_list_globs: vec!["/skills/triage/**/*.md".to_string()],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Filtered filesystem bind does not support symlinks"),
+            "{err}"
+        );
     }
 }

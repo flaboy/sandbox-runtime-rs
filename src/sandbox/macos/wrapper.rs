@@ -1,6 +1,5 @@
 //! Command wrapping for macOS sandbox-exec.
 
-
 use crate::config::SandboxRuntimeConfig;
 use crate::error::SandboxError;
 use crate::sandbox::macos::profile::{generate_log_tag, generate_profile};
@@ -25,7 +24,12 @@ pub fn wrap_command(
     };
 
     // Generate the Seatbelt profile
-    let profile = generate_profile(config, http_proxy_port, socks_proxy_port, log_tag.as_deref());
+    let profile = generate_profile(
+        config,
+        http_proxy_port,
+        socks_proxy_port,
+        log_tag.as_deref(),
+    );
 
     // Write profile to a temporary file
     let profile_path = write_profile_to_temp(&profile)?;
@@ -67,10 +71,7 @@ pub fn cleanup_temp_profiles() {
 }
 
 /// Generate proxy environment variables.
-pub fn generate_proxy_env(
-    http_proxy_port: u16,
-    socks_proxy_port: u16,
-) -> Vec<(String, String)> {
+pub fn generate_proxy_env(http_proxy_port: u16, socks_proxy_port: u16) -> Vec<(String, String)> {
     let http_proxy = format!("http://localhost:{}", http_proxy_port);
     let socks_proxy = format!("socks5://localhost:{}", socks_proxy_port);
 
@@ -99,7 +100,11 @@ mod tests {
     #[test]
     fn test_generate_proxy_env() {
         let env = generate_proxy_env(3128, 1080);
-        assert!(env.iter().any(|(k, v)| k == "http_proxy" && v.contains("3128")));
-        assert!(env.iter().any(|(k, v)| k == "ALL_PROXY" && v.contains("1080")));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "http_proxy" && v.contains("3128")));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "ALL_PROXY" && v.contains("1080")));
     }
 }

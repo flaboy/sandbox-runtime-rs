@@ -30,7 +30,7 @@ pub fn glob_to_regex(pattern: &str) -> String {
                 // Handle character classes
                 result.push('[');
                 // Copy until closing bracket
-                while let Some(cc) = chars.next() {
+                for cc in chars.by_ref() {
                     if cc == ']' {
                         result.push(']');
                         break;
@@ -41,7 +41,7 @@ pub fn glob_to_regex(pattern: &str) -> String {
             '{' => {
                 // Handle alternation {a,b,c}
                 result.push('(');
-                while let Some(cc) = chars.next() {
+                for cc in chars.by_ref() {
                     match cc {
                         '}' => {
                             result.push(')');

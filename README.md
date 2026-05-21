@@ -205,9 +205,23 @@ Unix sockets are **blocked by default** on both platforms.
 | Option | Type | Description |
 |--------|------|-------------|
 | `denyRead` | `string[]` | Paths/patterns denied for reading. Supports globs. |
+| `denyReadGlobs` | `string[]` | Glob patterns denied for reading. On Linux, must match `denyListGlobs` and target read-only aliases. |
+| `denyListGlobs` | `string[]` | Glob patterns hidden from directory listing. On Linux, must match `denyReadGlobs` and target read-only aliases. |
 | `allowWrite` | `string[]` | Paths allowed for writing. Default: deny all writes. |
 | `denyWrite` | `string[]` | Paths denied for writing. Overrides `allowWrite`. |
+| `binds` | `object[]` | Directory aliases from `source` to sandbox `target`; required for Linux read/list glob filtering. |
 | `allowGitConfig` | `boolean` | Allow writes to `.git/config`. Default: `false`. |
+
+Linux glob filtering has a stricter contract than macOS:
+
+- Read/list glob filtering is supported only for read-only `filesystem.binds` aliases.
+- `denyReadGlobs` and `denyListGlobs` must contain the same normalized patterns.
+- Each denied read/list glob must target exactly one alias target.
+- Denied read/list globs must target paths below the alias root, not the alias root itself.
+- Filtered alias source trees must not contain symlinks.
+- `allowWrite` and `denyWrite` glob patterns are not supported on Linux.
+- Unsupported glob shapes fail before command execution instead of being ignored.
+- Filtered aliases use a generated directory skeleton plus direct read-only bind mounts for allowed files; Linux does not copy projection trees.
 
 #### Other Options
 
@@ -410,6 +424,7 @@ sandbox-runtime-rs/
 **Linux (Bubblewrap)**:
 - Creates isolated filesystem namespace with `bwrap`
 - Mounts root as read-only, overlays writable paths
+- Filters read-only alias globs with skeleton directories and direct read-only file binds
 - Uses seccomp to block unauthorized Unix socket creation
 
 ### Mandatory Deny Paths

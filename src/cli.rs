@@ -55,7 +55,9 @@ impl Cli {
 
     /// Get the settings file path.
     pub fn get_settings_path(&self) -> Option<PathBuf> {
-        self.settings.clone().or_else(crate::config::default_settings_path)
+        self.settings
+            .clone()
+            .or_else(crate::config::default_settings_path)
     }
 }
 

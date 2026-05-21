@@ -19,9 +19,8 @@ pub fn load_config(path: &Path) -> Result<SandboxRuntimeConfig, SandboxError> {
         return Err(ConfigError::FileNotFound(path.display().to_string()).into());
     }
 
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        ConfigError::ParseError(format!("Failed to read config file: {}", e))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| ConfigError::ParseError(format!("Failed to read config file: {}", e)))?;
 
     parse_config(&content)
 }
@@ -36,9 +35,8 @@ pub fn load_default_config() -> Result<SandboxRuntimeConfig, SandboxError> {
 
 /// Parse configuration from a JSON string.
 pub fn parse_config(json: &str) -> Result<SandboxRuntimeConfig, SandboxError> {
-    let config: SandboxRuntimeConfig = serde_json::from_str(json).map_err(|e| {
-        ConfigError::ParseError(format!("Failed to parse config JSON: {}", e))
-    })?;
+    let config: SandboxRuntimeConfig = serde_json::from_str(json)
+        .map_err(|e| ConfigError::ParseError(format!("Failed to parse config JSON: {}", e)))?;
 
     // Validate the configuration
     config.validate()?;

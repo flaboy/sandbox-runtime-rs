@@ -1,7 +1,7 @@
 //! Debug logging utilities.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing_subscriber::EnvFilter;
 

@@ -1,6 +1,7 @@
 //! Bubblewrap command generation for Linux sandbox.
 
 use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::SandboxRuntimeConfig;
@@ -20,6 +21,7 @@ pub fn check_bwrap() -> bool {
 }
 
 /// Generate the bubblewrap command for sandboxed execution.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_bwrap_command(
     command: &str,
     config: &SandboxRuntimeConfig,
@@ -39,6 +41,7 @@ pub fn generate_bwrap_command(
         config.ripgrep.as_ref(),
         config.mandatory_deny_search_depth,
     )?;
+    ensure_host_mountpoints(&mounts)?;
 
     // Build bwrap arguments
     let mut bwrap_args = vec![
@@ -64,14 +67,14 @@ pub fn generate_bwrap_command(
     // Add writable mounts
     let mut created_target_dirs: HashSet<PathBuf> = HashSet::new();
     for mount in &mounts {
-        if !mount.readonly {
+        if mount.is_writable_bind() {
             bwrap_args.extend(mount.to_bwrap_args_with_created_dirs(&mut created_target_dirs));
         }
     }
 
     // Add read-only (deny) mounts to override writable ones
     for mount in &mounts {
-        if mount.readonly {
+        if !mount.is_writable_bind() {
             bwrap_args.extend(mount.to_bwrap_args_with_created_dirs(&mut created_target_dirs));
         }
     }
@@ -126,6 +129,23 @@ pub fn generate_bwrap_command(
     Ok((wrapped, warnings))
 }
 
+fn ensure_host_mountpoints(
+    mounts: &[crate::sandbox::linux::filesystem::BindMount],
+) -> Result<(), SandboxError> {
+    for mount in mounts {
+        if mount.create_target_dir {
+            fs::create_dir_all(&mount.target).map_err(|err| {
+                SandboxError::ExecutionFailed(format!(
+                    "Failed to create bubblewrap target mountpoint '{}': {}",
+                    mount.target.display(),
+                    err
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Build the inner command to run inside bubblewrap.
 /// This sets up socat bridges and applies seccomp before running the user command.
 fn build_inner_command(
@@ -138,16 +158,26 @@ fn build_inner_command(
     shell: &str,
 ) -> Result<String, SandboxError> {
     let mut parts = Vec::new();
+    let mut bridge_pids = Vec::new();
 
     // Set up socat bridges for proxy access
     if let Some(http_sock) = http_socket_path {
         let bridge_cmd = SocatBridge::tcp_to_unix_command(http_proxy_port, http_sock);
         parts.push(format!("{} &", bridge_cmd));
+        parts.push("srt_bridge_http_pid=$!".to_string());
+        bridge_pids.push("$srt_bridge_http_pid");
     }
 
     if let Some(socks_sock) = socks_socket_path {
         let bridge_cmd = SocatBridge::tcp_to_unix_command(socks_proxy_port, socks_sock);
         parts.push(format!("{} &", bridge_cmd));
+        parts.push("srt_bridge_socks_pid=$!".to_string());
+        bridge_pids.push("$srt_bridge_socks_pid");
+    }
+
+    if !bridge_pids.is_empty() {
+        let pids = bridge_pids.join(" ");
+        parts.push(format!("srt_cleanup_bridges() {{ kill {pids} 2>/dev/null || true; wait {pids} 2>/dev/null || true; }}"));
     }
 
     // Small delay to let socat bridges start
@@ -155,8 +185,7 @@ fn build_inner_command(
         parts.push("sleep 0.1".to_string());
     }
 
-    // Apply seccomp filter and execute command
-    if !config.network.allow_all_unix_sockets.unwrap_or(false) {
+    let user_command = if !config.network.allow_all_unix_sockets.unwrap_or(false) {
         // Try to use seccomp to block Unix socket creation
         if let (Ok(bpf_path), Ok(apply_path)) = (
             get_bpf_path(config.seccomp.as_ref()),
@@ -167,25 +196,33 @@ fn build_inner_command(
             parts.push(env_vars);
 
             // Use apply-seccomp to apply the filter and exec the command
-            parts.push(format!(
+            format!(
                 "{} {} {} -c {}",
                 apply_path.display(),
                 bpf_path.display(),
                 shell,
                 quote(command)
-            ));
+            )
         } else {
             // Seccomp not available, just run the command with warning
             tracing::warn!("Seccomp not available - Unix socket creation will not be blocked");
             let env_vars = generate_proxy_env_string(http_proxy_port, socks_proxy_port);
             parts.push(env_vars);
-            parts.push(format!("{} -c {}", shell, quote(command)));
+            format!("{} -c {}", shell, quote(command))
         }
     } else {
         // Unix sockets allowed, just run the command
         let env_vars = generate_proxy_env_string(http_proxy_port, socks_proxy_port);
         parts.push(env_vars);
-        parts.push(format!("{} -c {}", shell, quote(command)));
+        format!("{} -c {}", shell, quote(command))
+    };
+
+    if bridge_pids.is_empty() {
+        parts.push(user_command);
+    } else {
+        parts.push(format!(
+            "{user_command}\nsrt_status=$?\nsrt_cleanup_bridges\nexit $srt_status"
+        ));
     }
 
     Ok(parts.join("\n"))

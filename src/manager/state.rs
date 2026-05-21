@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-
 use crate::config::SandboxRuntimeConfig;
 use crate::proxy::{HttpProxy, Socks5Proxy};
 use crate::violation::SandboxViolationStore;

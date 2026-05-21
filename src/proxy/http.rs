@@ -247,7 +247,10 @@ async fn tunnel_via_mitm(
     let mut mitm_stream = UnixStream::connect(socket_path).await?;
 
     // Send CONNECT request to MITM proxy
-    let connect_req = format!("CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n", host, port, host, port);
+    let connect_req = format!(
+        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
+        host, port, host, port
+    );
     mitm_stream.write_all(connect_req.as_bytes()).await?;
 
     // Read response (should be 200 Connection Established)
@@ -320,11 +323,7 @@ async fn handle_http(
 async fn forward_http(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let host = req
-        .uri()
-        .host()
-        .unwrap_or_default()
-        .to_string();
+    let host = req.uri().host().unwrap_or_default().to_string();
     let port = req.uri().port_u16().unwrap_or(80);
 
     // Connect to target

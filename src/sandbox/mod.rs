@@ -65,7 +65,9 @@ pub fn check_linux_dependencies(
     let mut result = SandboxDependencyCheck::default();
 
     if !linux::check_bwrap() {
-        result.errors.push("bubblewrap (bwrap) not installed".to_string());
+        result
+            .errors
+            .push("bubblewrap (bwrap) not installed".to_string());
     }
     if !linux::check_socat() {
         result.errors.push("socat not installed".to_string());
@@ -74,9 +76,9 @@ pub fn check_linux_dependencies(
     let has_bpf = linux::get_bpf_path(seccomp_config).is_ok();
     let has_apply = linux::get_apply_seccomp_path(seccomp_config).is_ok();
     if !has_bpf || !has_apply {
-        result.warnings.push(
-            "seccomp not available - unix socket access not restricted".to_string(),
-        );
+        result
+            .warnings
+            .push("seccomp not available - unix socket access not restricted".to_string());
     }
 
     result
@@ -86,8 +88,9 @@ pub fn check_linux_dependencies(
 /// Returns a structured result with errors and warnings.
 pub fn check_dependencies_detailed(
     platform: Platform,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    seccomp_config: Option<&crate::config::SeccompConfig>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] seccomp_config: Option<
+        &crate::config::SeccompConfig,
+    >,
 ) -> SandboxDependencyCheck {
     match platform {
         Platform::MacOS => {
@@ -113,10 +116,13 @@ pub fn check_dependencies_detailed(
 /// Check if sandboxing dependencies are available for the current platform.
 /// Legacy function that returns Result for backward compatibility.
 pub fn check_dependencies(platform: Platform) -> Result<(), SandboxError> {
-    check_dependencies_detailed(platform, None).into_result().map(|_| ())
+    check_dependencies_detailed(platform, None)
+        .into_result()
+        .map(|_| ())
 }
 
 /// Wrap a command with platform-specific sandboxing.
+#[allow(clippy::too_many_arguments)]
 pub async fn wrap_command(
     command: &str,
     config: &SandboxRuntimeConfig,
@@ -126,7 +132,7 @@ pub async fn wrap_command(
     #[cfg(target_os = "linux")] http_socket_path: Option<&str>,
     #[cfg(target_os = "linux")] socks_socket_path: Option<&str>,
     shell: Option<&str>,
-    enable_log_monitor: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] enable_log_monitor: bool,
 ) -> Result<WrapResult, SandboxError> {
     match platform {
         Platform::MacOS => {

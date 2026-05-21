@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 
 use crate::config::SandboxRuntimeConfig;
 use crate::error::SandboxError;
-use crate::utils::{current_platform, check_ripgrep, Platform};
+use crate::utils::{check_ripgrep, current_platform, Platform};
 use crate::violation::SandboxViolationStore;
 
 use self::state::ManagerState;
@@ -42,7 +42,10 @@ impl SandboxManager {
     }
 
     /// Check if all required dependencies are available.
-    pub fn check_dependencies(&self, config: Option<&SandboxRuntimeConfig>) -> Result<(), SandboxError> {
+    pub fn check_dependencies(
+        &self,
+        config: Option<&SandboxRuntimeConfig>,
+    ) -> Result<(), SandboxError> {
         let platform = current_platform()
             .ok_or_else(|| SandboxError::UnsupportedPlatform("Unsupported platform".to_string()))?;
 
@@ -72,11 +75,32 @@ impl SandboxManager {
             .ok_or_else(|| SandboxError::UnsupportedPlatform("Unsupported platform".to_string()))?;
 
         // Initialize proxies
-        let (http_proxy, socks_proxy) =
-            network::initialize_proxies(&config.network).await?;
+        let (http_proxy, socks_proxy) = network::initialize_proxies(&config.network).await?;
 
         let http_port = http_proxy.port();
         let socks_port = socks_proxy.port();
+
+        #[cfg(target_os = "linux")]
+        let (http_socket_path, socks_socket_path, http_bridge, socks_bridge) = {
+            use crate::sandbox::linux::{generate_socket_path, SocatBridge};
+
+            // Create Unix socket bridges for proxies before taking the state lock.
+            let http_socket_path = generate_socket_path("srt-http");
+            let socks_socket_path = generate_socket_path("srt-socks");
+
+            let http_bridge =
+                SocatBridge::unix_to_tcp(http_socket_path.clone(), "localhost", http_port).await?;
+            let socks_bridge =
+                SocatBridge::unix_to_tcp(socks_socket_path.clone(), "localhost", socks_port)
+                    .await?;
+
+            (
+                http_socket_path,
+                socks_socket_path,
+                http_bridge,
+                socks_bridge,
+            )
+        };
 
         // Update state
         let mut state = self.state.write();
@@ -88,18 +112,6 @@ impl SandboxManager {
         // Initialize platform-specific infrastructure
         #[cfg(target_os = "linux")]
         {
-            use crate::sandbox::linux::{generate_socket_path, SocatBridge};
-
-            // Create Unix socket bridges for proxies
-            let http_socket_path = generate_socket_path("srt-http");
-            let socks_socket_path = generate_socket_path("srt-socks");
-
-            let http_bridge =
-                SocatBridge::unix_to_tcp(http_socket_path.clone(), "localhost", http_port).await?;
-            let socks_bridge =
-                SocatBridge::unix_to_tcp(socks_socket_path.clone(), "localhost", socks_port)
-                    .await?;
-
             state.http_socket_path = Some(http_socket_path.display().to_string());
             state.socks_socket_path = Some(socks_socket_path.display().to_string());
             state.bridges.push(http_bridge);
@@ -199,18 +211,12 @@ impl SandboxManager {
                 let mut warnings = Vec::new();
                 for path in &config.filesystem.allow_write {
                     if crate::utils::contains_glob_chars(path) {
-                        warnings.push(format!(
-                            "Glob pattern '{}' is not supported on Linux",
-                            path
-                        ));
+                        warnings.push(format!("Glob pattern '{}' is not supported on Linux", path));
                     }
                 }
                 for path in &config.filesystem.deny_write {
                     if crate::utils::contains_glob_chars(path) {
-                        warnings.push(format!(
-                            "Glob pattern '{}' is not supported on Linux",
-                            path
-                        ));
+                        warnings.push(format!("Glob pattern '{}' is not supported on Linux", path));
                     }
                 }
                 return warnings;
@@ -243,7 +249,9 @@ impl SandboxManager {
 
             let config = custom_config
                 .or_else(|| state.config.clone())
-                .ok_or_else(|| SandboxError::ExecutionFailed("No configuration available".to_string()))?;
+                .ok_or_else(|| {
+                    SandboxError::ExecutionFailed("No configuration available".to_string())
+                })?;
 
             (config, state.http_proxy_port, state.socks_proxy_port)
         };
@@ -255,12 +263,7 @@ impl SandboxManager {
         #[cfg(target_os = "macos")]
         {
             let (wrapped, _log_tag) = crate::sandbox::macos::wrap_command(
-                command,
-                &config,
-                http_port,
-                socks_port,
-                shell,
-                true, // enable log monitor
+                command, &config, http_port, socks_port, shell, true, // enable log monitor
             )?;
             Ok(wrapped)
         }
@@ -269,7 +272,10 @@ impl SandboxManager {
         {
             let (http_socket, socks_socket) = {
                 let state = self.state.read();
-                (state.http_socket_path.clone(), state.socks_socket_path.clone())
+                (
+                    state.http_socket_path.clone(),
+                    state.socks_socket_path.clone(),
+                )
             };
 
             let cwd = std::env::current_dir()?;

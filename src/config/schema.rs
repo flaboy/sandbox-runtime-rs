@@ -236,8 +236,7 @@ fn validate_domain_pattern(pattern: &str) -> Result<(), SandboxError> {
     }
 
     // Check for too broad patterns like *.com
-    if pattern.starts_with("*.") {
-        let suffix = &pattern[2..];
+    if let Some(suffix) = pattern.strip_prefix("*.") {
         // Check if suffix is a TLD or too short
         if !suffix.contains('.') && suffix.len() <= 4 {
             return Err(ConfigError::InvalidDomainPattern {
@@ -258,8 +257,8 @@ fn validate_domain_pattern(pattern: &str) -> Result<(), SandboxError> {
     }
 
     // Check for invalid characters
-    let check_part = if pattern.starts_with("*.") {
-        &pattern[2..]
+    let check_part = if let Some(stripped) = pattern.strip_prefix("*.") {
+        stripped
     } else {
         pattern
     };
@@ -282,9 +281,8 @@ pub fn matches_domain_pattern(hostname: &str, pattern: &str) -> bool {
     let hostname_lower = hostname.to_lowercase();
     let pattern_lower = pattern.to_lowercase();
 
-    if pattern_lower.starts_with("*.") {
+    if let Some(base_domain) = pattern_lower.strip_prefix("*.") {
         // Wildcard pattern: *.example.com matches api.example.com but NOT example.com
-        let base_domain = &pattern_lower[2..];
         hostname_lower.ends_with(&format!(".{}", base_domain))
     } else {
         // Exact match

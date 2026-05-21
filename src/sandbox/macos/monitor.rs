@@ -30,7 +30,10 @@ impl LogMonitor {
             .args([
                 "stream",
                 "--predicate",
-                &format!("subsystem == 'com.apple.sandbox' AND eventMessage CONTAINS '{}'", log_tag),
+                &format!(
+                    "subsystem == 'com.apple.sandbox' AND eventMessage CONTAINS '{}'",
+                    log_tag
+                ),
                 "--style",
                 "compact",
             ])

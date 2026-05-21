@@ -130,3 +130,54 @@ fn no_debug_output_without_srt_debug() {
     assert!(!stderr(&output).contains("Original command"));
     assert!(!stderr(&output).contains("Command string mode"));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_filtered_alias_hides_denied_markdown_from_read_and_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = temp.path().join("skill-source");
+    std::fs::create_dir_all(source_root.join("scripts")).unwrap();
+    std::fs::write(source_root.join("SKILL.md"), "hidden").unwrap();
+    std::fs::write(
+        source_root.join("scripts").join("run.sh"),
+        "#!/bin/sh\necho allowed",
+    )
+    .unwrap();
+
+    let settings = temp.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        serde_json::json!({
+            "network": { "allowAllUnixSockets": true },
+            "filesystem": {
+                "binds": [{
+                    "source": source_root.display().to_string(),
+                    "target": "/skills/triage",
+                    "writable": false
+                }],
+                "denyReadGlobs": ["/skills/triage/**/*.md"],
+                "denyListGlobs": ["/skills/triage/**/*.md"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_srt"))
+        .args([
+            "-s",
+            settings.to_str().unwrap(),
+            "-c",
+            "test ! -e /skills/triage/SKILL.md && ! ls /skills/triage | grep SKILL.md && test -f /skills/triage/scripts/run.sh && cat /skills/triage/scripts/run.sh",
+        ])
+        .output()
+        .expect("srt should execute");
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout(&output).contains("allowed"));
+}

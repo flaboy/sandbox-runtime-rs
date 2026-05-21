@@ -170,22 +170,34 @@ mod tests {
     fn test_wsl_version_parsing_wsl2() {
         // WSL2 kernel version string (typical format)
         let wsl2_version = "Linux version 5.15.90.1-microsoft-standard-WSL2 (oe-user@oe-host)";
-        assert_eq!(parse_wsl_version_from_string(wsl2_version), Some("2".to_string()));
+        assert_eq!(
+            parse_wsl_version_from_string(wsl2_version),
+            Some("2".to_string())
+        );
 
         // Case insensitivity
         let wsl2_upper = "Linux version 5.15.90.1-MICROSOFT-STANDARD-WSL2";
-        assert_eq!(parse_wsl_version_from_string(wsl2_upper), Some("2".to_string()));
+        assert_eq!(
+            parse_wsl_version_from_string(wsl2_upper),
+            Some("2".to_string())
+        );
     }
 
     #[test]
     fn test_wsl_version_parsing_wsl1() {
         // WSL1 kernel version string (original format with just "Microsoft")
         let wsl1_version = "Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)";
-        assert_eq!(parse_wsl_version_from_string(wsl1_version), Some("1".to_string()));
+        assert_eq!(
+            parse_wsl_version_from_string(wsl1_version),
+            Some("1".to_string())
+        );
 
         // Case variations
         let wsl1_lower = "linux version 4.4.0-19041-microsoft";
-        assert_eq!(parse_wsl_version_from_string(wsl1_lower), Some("1".to_string()));
+        assert_eq!(
+            parse_wsl_version_from_string(wsl1_lower),
+            Some("1".to_string())
+        );
     }
 
     #[test]
