@@ -133,7 +133,7 @@ fn no_debug_output_without_srt_debug() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_filtered_alias_hides_denied_markdown_from_read_and_list() {
+fn linux_read_deny_manifest_allows_list_and_blocks_read() {
     let temp = tempfile::tempdir().unwrap();
     let source_root = temp.path().join("skill-source");
     std::fs::create_dir_all(source_root.join("scripts")).unwrap();
@@ -141,6 +141,20 @@ fn linux_filtered_alias_hides_denied_markdown_from_read_and_list() {
     std::fs::write(
         source_root.join("scripts").join("run.sh"),
         "#!/bin/sh\necho allowed",
+    )
+    .unwrap();
+
+    let manifest = temp.path().join("read-deny-manifest.json");
+    std::fs::write(
+        &manifest,
+        serde_json::json!({
+            "schemaVersion": 1,
+            "entries": [{
+                "bindTarget": "/skills/triage",
+                "relativePath": "SKILL.md"
+            }]
+        })
+        .to_string(),
     )
     .unwrap();
 
@@ -156,7 +170,8 @@ fn linux_filtered_alias_hides_denied_markdown_from_read_and_list() {
                     "writable": false
                 }],
                 "denyReadGlobs": ["/skills/triage/**/*.md"],
-                "denyListGlobs": ["/skills/triage/**/*.md"]
+                "denyReadManifest": manifest.display().to_string(),
+                "denyListGlobs": []
             }
         })
         .to_string(),
@@ -168,7 +183,7 @@ fn linux_filtered_alias_hides_denied_markdown_from_read_and_list() {
             "-s",
             settings.to_str().unwrap(),
             "-c",
-            "test ! -e /skills/triage/SKILL.md && ! ls /skills/triage | grep SKILL.md && test -f /skills/triage/scripts/run.sh && cat /skills/triage/scripts/run.sh",
+            "ls /skills/triage | grep SKILL.md && ! cat /skills/triage/SKILL.md >/tmp/skill-read.out 2>/tmp/skill-read.err && test -f /skills/triage/scripts/run.sh && cat /skills/triage/scripts/run.sh",
         ])
         .output()
         .expect("srt should execute");

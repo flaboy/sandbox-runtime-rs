@@ -1,9 +1,8 @@
 //! Filesystem bind mount generation for bubblewrap.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Component, Path, PathBuf};
 
 use crate::config::{FilesystemConfig, RipgrepConfig, DANGEROUS_DIRECTORIES, DANGEROUS_FILES};
 use crate::error::SandboxError;
@@ -11,8 +10,6 @@ use crate::utils::{
     contains_glob_chars, find_dangerous_files, is_symlink_outside_boundary,
     normalize_path_for_sandbox,
 };
-
-static PROJECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Bind mount specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,10 +176,18 @@ struct AliasBind {
     writable: bool,
 }
 
-#[derive(Debug)]
-struct FilteredAliasPlan {
-    skeleton_root: PathBuf,
-    file_mounts: Vec<BindMount>,
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadDenyManifest {
+    schema_version: u32,
+    entries: Vec<ReadDenyManifestEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadDenyManifestEntry {
+    bind_target: String,
+    relative_path: String,
 }
 
 fn target_dir_args(target: &Path, created_target_dirs: &mut HashSet<PathBuf>) -> Vec<String> {
@@ -289,7 +294,7 @@ pub fn generate_bind_mounts(
     }
 
     let alias_binds = normalize_alias_binds(config)?;
-    validate_linux_glob_filter_contract(config, &alias_binds)?;
+    validate_linux_glob_filter_contract(config)?;
     let bind_mounts = generate_alias_bind_mounts(config, &alias_binds)?;
 
     // Generate mounts
@@ -355,90 +360,37 @@ fn generate_alias_bind_mounts(
     aliases: &[AliasBind],
 ) -> Result<Vec<BindMount>, SandboxError> {
     let mut mounts = Vec::new();
-    let patterns = filesystem_projection_patterns(config);
     for alias in aliases {
-        let translated_patterns = translate_alias_patterns(&patterns, alias)?;
-        if translated_patterns.is_empty() {
-            mounts.push(BindMount::alias(
-                alias.source.clone(),
-                alias.target.clone(),
-                alias.writable,
-            ));
-        } else {
-            if alias.writable {
-                return Err(SandboxError::ExecutionFailed(format!(
-                    "Writable filesystem bind cannot use read/list glob filtering: {} -> {}",
-                    alias.source.display(),
-                    alias.target.display()
-                )));
-            }
-            let plan =
-                create_filtered_alias_plan(&alias.source, &alias.target, &translated_patterns)?;
-            mounts.push(BindMount::filtered_alias_root(
-                plan.skeleton_root,
-                alias.target.clone(),
-            ));
-            mounts.extend(plan.file_mounts);
-        }
+        mounts.push(BindMount::alias(
+            alias.source.clone(),
+            alias.target.clone(),
+            alias.writable,
+        ));
         mounts.push(BindMount::hide_source_tmpfs(alias.source.clone()));
     }
+    mounts.extend(generate_read_deny_manifest_mounts(config, aliases)?);
     Ok(mounts)
 }
 
-fn validate_linux_glob_filter_contract(
-    config: &FilesystemConfig,
-    aliases: &[AliasBind],
-) -> Result<(), SandboxError> {
-    let read_globs = config
-        .deny_read_globs
-        .iter()
-        .map(|pattern| normalize_path_for_sandbox(pattern))
-        .collect::<Vec<_>>();
-    let list_globs = config
-        .deny_list_globs
-        .iter()
-        .map(|pattern| normalize_path_for_sandbox(pattern))
-        .collect::<Vec<_>>();
-
-    if read_globs != list_globs {
+fn validate_linux_glob_filter_contract(config: &FilesystemConfig) -> Result<(), SandboxError> {
+    if !config.deny_list_globs.is_empty() {
         return Err(SandboxError::ExecutionFailed(
-            "Linux read/list glob filtering requires identical denyReadGlobs and denyListGlobs"
+            "denyListGlobs is not supported on linux; use denyReadManifest and allow list visibility"
                 .to_string(),
         ));
     }
 
-    for pattern in read_globs {
-        let matching_aliases = aliases
-            .iter()
-            .filter(|alias| pattern_targets_alias(&pattern, &alias.target))
-            .collect::<Vec<_>>();
-
-        match matching_aliases.as_slice() {
-            [] => {
-                return Err(SandboxError::ExecutionFailed(
-                    "Linux read/list glob filtering is only supported for filesystem.binds aliases"
-                        .to_string(),
-                ));
-            }
-            [alias] if alias.writable => {
-                return Err(SandboxError::ExecutionFailed(format!(
-                    "Writable filesystem bind cannot use read/list glob filtering: {} -> {}",
-                    alias.source.display(),
-                    alias.target.display()
-                )));
-            }
-            [alias] if pattern == alias.target.display().to_string() => {
-                return Err(SandboxError::ExecutionFailed(format!(
-                    "Linux read/list glob filtering cannot target alias root exactly: {pattern}"
-                )));
-            }
-            [_] => {}
-            _ => {
-                return Err(SandboxError::ExecutionFailed(format!(
-                    "Linux read/list glob pattern targets multiple filesystem.binds aliases: {pattern}"
-                )));
-            }
-        }
+    if !config.deny_read_globs.is_empty()
+        && config
+            .deny_read_manifest
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Err(SandboxError::ExecutionFailed(
+            "denyReadGlobs requires denyReadManifest on linux".to_string(),
+        ));
     }
 
     Ok(())
@@ -470,156 +422,131 @@ fn normalize_bind_path(raw: &str, field: &str) -> Result<PathBuf, SandboxError> 
     Ok(path)
 }
 
-fn filesystem_projection_patterns(config: &FilesystemConfig) -> Vec<String> {
-    let mut patterns = Vec::new();
-    patterns.extend(config.deny_read_globs.iter().cloned());
-    patterns.extend(config.deny_list_globs.iter().cloned());
-    patterns
-}
-
-fn translate_alias_patterns(
-    patterns: &[String],
-    alias: &AliasBind,
-) -> Result<Vec<glob::Pattern>, SandboxError> {
-    let mut out = Vec::new();
-    for pattern in patterns {
-        let normalized = normalize_path_for_sandbox(pattern);
-        let Some(translated) = rewrite_alias_pattern(&normalized, &alias.target, &alias.source)
-        else {
-            continue;
-        };
-        let compiled = glob::Pattern::new(&translated).map_err(|err| {
-            SandboxError::ExecutionFailed(format!(
-                "Invalid filesystem glob pattern '{}': {}",
-                pattern, err
-            ))
-        })?;
-        out.push(compiled);
-    }
-    Ok(out)
-}
-
-fn rewrite_alias_pattern(pattern: &str, target: &Path, source: &Path) -> Option<String> {
-    if !pattern_targets_alias(pattern, target) {
-        return None;
-    }
-    let target = target.display().to_string();
-    let source = source.display().to_string();
-    if pattern == target {
-        return Some(source);
-    }
-    Some(format!("{}{}", source, &pattern[target.len()..]))
-}
-
-fn pattern_targets_alias(pattern: &str, target: &Path) -> bool {
-    let target = target.display().to_string();
-    pattern == target || pattern.starts_with(&format!("{target}/"))
-}
-
 fn is_alias_target_path(path: &Path, aliases: &[AliasBind]) -> bool {
     aliases.iter().any(|alias| path.starts_with(&alias.target))
 }
 
-fn create_filtered_alias_plan(
-    source_root: &Path,
-    target_root: &Path,
-    denied_patterns: &[glob::Pattern],
-) -> Result<FilteredAliasPlan, SandboxError> {
-    reject_filtered_alias_symlinks(source_root)?;
-    let id = PROJECTION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let skeleton_root =
-        std::env::temp_dir().join(format!("srt-filtered-alias-{}-{}", std::process::id(), id));
-    if skeleton_root.exists() {
-        fs::remove_dir_all(&skeleton_root)?;
+fn generate_read_deny_manifest_mounts(
+    config: &FilesystemConfig,
+    aliases: &[AliasBind],
+) -> Result<Vec<BindMount>, SandboxError> {
+    let Some(manifest_path) = config.deny_read_manifest.as_deref().map(str::trim) else {
+        return Ok(Vec::new());
+    };
+    if manifest_path.is_empty() {
+        return Err(SandboxError::ExecutionFailed(
+            "denyReadManifest must not be empty".to_string(),
+        ));
     }
-    fs::create_dir_all(&skeleton_root)?;
-    let mut file_mounts = Vec::new();
-    build_filtered_alias_tree(
-        source_root,
-        source_root,
-        target_root,
-        &skeleton_root,
-        denied_patterns,
-        &mut file_mounts,
-    )?;
-    Ok(FilteredAliasPlan {
-        skeleton_root,
-        file_mounts,
-    })
-}
 
-fn reject_filtered_alias_symlinks(current: &Path) -> Result<(), SandboxError> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let metadata = fs::symlink_metadata(&source_path)?;
+    let manifest_content = fs::read_to_string(manifest_path).map_err(|err| {
+        SandboxError::ExecutionFailed(format!(
+            "Failed to read denyReadManifest '{}': {}",
+            manifest_path, err
+        ))
+    })?;
+    let manifest: ReadDenyManifest = serde_json::from_str(&manifest_content).map_err(|err| {
+        SandboxError::ExecutionFailed(format!(
+            "Failed to parse denyReadManifest '{}': {}",
+            manifest_path, err
+        ))
+    })?;
+    if manifest.schema_version != 1 {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "denyReadManifest unsupported schemaVersion: {}",
+            manifest.schema_version
+        )));
+    }
+
+    let alias_by_target = aliases
+        .iter()
+        .map(|alias| (alias.target.clone(), alias))
+        .collect::<HashMap<_, _>>();
+    let mut mounts = Vec::new();
+    for entry in manifest.entries {
+        let bind_target = PathBuf::from(normalize_path_for_sandbox(&entry.bind_target));
+        let Some(alias) = alias_by_target.get(&bind_target) else {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "denyReadManifest references unknown bind target: {}",
+                entry.bind_target
+            )));
+        };
+        if alias.writable {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "Writable filesystem bind cannot use denyReadManifest: {} -> {}",
+                alias.source.display(),
+                alias.target.display()
+            )));
+        }
+
+        let relative = validate_manifest_relative_path(&entry.relative_path)?;
+        if relative.extension().and_then(|value| value.to_str()) != Some("md") {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "denyReadManifest entry must target .md: {}",
+                entry.relative_path
+            )));
+        }
+
+        let source_path = alias.source.join(&relative);
+        let metadata = fs::symlink_metadata(&source_path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                SandboxError::ExecutionFailed(format!(
+                    "denyReadManifest entry source does not exist: {}",
+                    source_path.display()
+                ))
+            } else {
+                SandboxError::ExecutionFailed(format!(
+                    "Failed to inspect denyReadManifest entry source '{}': {}",
+                    source_path.display(),
+                    err
+                ))
+            }
+        })?;
         if metadata.file_type().is_symlink() {
             return Err(SandboxError::ExecutionFailed(format!(
-                "Filtered filesystem bind does not support symlinks: {}",
+                "denyReadManifest entry source is a symlink: {}",
                 source_path.display()
             )));
         }
-        if metadata.is_dir() {
-            reject_filtered_alias_symlinks(&source_path)?;
+        if !metadata.is_file() {
+            return Err(SandboxError::ExecutionFailed(format!(
+                "denyReadManifest entry source is not a regular file: {}",
+                source_path.display()
+            )));
         }
+
+        mounts.push(BindMount::block(alias.target.join(relative)));
     }
-    Ok(())
+
+    Ok(mounts)
 }
 
-fn build_filtered_alias_tree(
-    source_root: &Path,
-    current: &Path,
-    target_root: &Path,
-    skeleton_root: &Path,
-    denied_patterns: &[glob::Pattern],
-    file_mounts: &mut Vec<BindMount>,
-) -> Result<(), SandboxError> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        if denied_patterns
-            .iter()
-            .any(|pattern| pattern.matches_path(&source_path))
-        {
-            continue;
-        }
+fn validate_manifest_relative_path(raw: &str) -> Result<PathBuf, SandboxError> {
+    let path = Path::new(raw);
+    if raw.trim().is_empty() || path.is_absolute() {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "denyReadManifest entry escapes bind target: {raw}"
+        )));
+    }
 
-        let relative = source_path.strip_prefix(source_root).map_err(|err| {
-            SandboxError::ExecutionFailed(format!(
-                "Failed to project filesystem path '{}': {}",
-                source_path.display(),
-                err
-            ))
-        })?;
-        let skeleton_path = skeleton_root.join(relative);
-        let sandbox_path = target_root.join(relative);
-        let metadata = fs::symlink_metadata(&source_path)?;
-        if metadata.is_dir() {
-            fs::create_dir_all(&skeleton_path)?;
-            fs::set_permissions(&skeleton_path, metadata.permissions())?;
-            build_filtered_alias_tree(
-                source_root,
-                &source_path,
-                target_root,
-                skeleton_root,
-                denied_patterns,
-                file_mounts,
-            )?;
-        } else if metadata.file_type().is_symlink() {
-            return Err(SandboxError::ExecutionFailed(format!(
-                "Filtered filesystem bind does not support symlinks: {}",
-                source_path.display()
-            )));
-        } else if metadata.is_file() {
-            if let Some(parent) = skeleton_path.parent() {
-                fs::create_dir_all(parent)?;
+    let mut has_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_component = true,
+            _ => {
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "denyReadManifest entry escapes bind target: {raw}"
+                )));
             }
-            fs::File::create(&skeleton_path)?;
-            fs::set_permissions(&skeleton_path, metadata.permissions())?;
-            file_mounts.push(BindMount::filtered_alias_file(source_path, sandbox_path));
         }
     }
-    Ok(())
+    if !has_component {
+        return Err(SandboxError::ExecutionFailed(format!(
+            "denyReadManifest entry escapes bind target: {raw}"
+        )));
+    }
+
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -642,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_bind_mounts_rejects_non_alias_denied_markdown_globs() {
+    fn test_generate_bind_mounts_rejects_deny_list_globs_before_projection() {
         let temp = tempfile::tempdir().unwrap();
         let skill_root = temp.path().join("skills").join("triage");
         std::fs::create_dir_all(skill_root.join("references")).unwrap();
@@ -659,15 +586,63 @@ mod tests {
 
         let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
         assert!(
-            err.to_string().contains(
-                "Linux read/list glob filtering is only supported for filesystem.binds aliases"
-            ),
+            err.to_string()
+                .contains("denyListGlobs is not supported on linux"),
             "{err}"
         );
     }
 
     #[test]
-    fn test_filtered_alias_bind_does_not_create_copy_projection() {
+    fn test_linux_rejects_deny_list_globs() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/demo".to_string(),
+                writable: Some(false),
+            }],
+            deny_list_globs: vec!["/skills/demo/**/*.md".to_string()],
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("denyListGlobs is not supported on linux"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_linux_rejects_deny_read_globs_without_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/demo".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/demo/**/*.md".to_string()],
+            deny_read_manifest: None,
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("denyReadGlobs requires denyReadManifest"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_deny_read_manifest_does_not_create_filtered_alias() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("mounted").join("skills").join("triage");
         std::fs::create_dir_all(source_root.join("scripts")).unwrap();
@@ -683,6 +658,18 @@ mod tests {
             "console.log('allowed');",
         )
         .unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "SKILL.md"},
+                    {"bindTarget": "/skills/triage", "relativePath": "references/policy.md"}
+                ]
+            }"#,
+        )
+        .unwrap();
 
         let config = FilesystemConfig {
             binds: vec![crate::config::schema::FilesystemBindConfig {
@@ -691,7 +678,7 @@ mod tests {
                 writable: Some(false),
             }],
             deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
-            deny_list_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
             ..Default::default()
         };
 
@@ -703,25 +690,35 @@ mod tests {
                 .source
                 .display()
                 .to_string()
-                .contains("srt-projection-")),
-            "filtered alias must not use copy projection mounts: {mounts:?}"
+                .contains("srt-filtered-alias")),
+            "read deny manifest must not use filtered alias source mounts: {mounts:?}"
+        );
+        assert!(
+            mounts.iter().any(|mount| mount.source == source_root
+                && mount.target == Path::new("/skills/triage")
+                && mount.op == BindMountOp::ReadOnlyBind),
+            "source root should be mounted directly as ordinary readonly alias"
         );
         assert!(
             mounts
                 .iter()
-                .any(|mount| mount.target == Path::new("/skills/triage/scripts/classify.js")),
-            "allowed file should be mounted directly into filtered alias"
+                .any(|mount| mount.source == Path::new("/dev/null")
+                    && mount.target == Path::new("/skills/triage/SKILL.md")
+                    && mount.op == BindMountOp::DevNullBind),
+            "manifest markdown file should be blocked by dev-null overlay"
         );
         assert!(
             mounts
                 .iter()
-                .all(|mount| mount.target != Path::new("/skills/triage/SKILL.md")),
-            "denied markdown file must not be mounted"
+                .any(|mount| mount.source == Path::new("/dev/null")
+                    && mount.target == Path::new("/skills/triage/references/policy.md")
+                    && mount.op == BindMountOp::DevNullBind),
+            "nested manifest markdown file should be blocked by dev-null overlay"
         );
     }
 
     #[test]
-    fn test_filtered_alias_rejects_asymmetric_read_and_list_globs() {
+    fn test_linux_rejects_deny_read_globs_without_manifest_for_alias() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("skill");
         std::fs::create_dir_all(&source_root).unwrap();
@@ -739,15 +736,14 @@ mod tests {
 
         let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
         assert!(
-            err.to_string().contains(
-                "Linux read/list glob filtering requires identical denyReadGlobs and denyListGlobs"
-            ),
+            err.to_string()
+                .contains("denyReadGlobs requires denyReadManifest"),
             "{err}"
         );
     }
 
     #[test]
-    fn test_filtered_alias_rejects_non_alias_globs() {
+    fn test_linux_rejects_deny_list_globs_for_non_alias_globs() {
         let temp = tempfile::tempdir().unwrap();
         let loose_root = temp.path().join("loose");
         std::fs::create_dir_all(&loose_root).unwrap();
@@ -761,9 +757,8 @@ mod tests {
 
         let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
         assert!(
-            err.to_string().contains(
-                "Linux read/list glob filtering is only supported for filesystem.binds aliases"
-            ),
+            err.to_string()
+                .contains("denyListGlobs is not supported on linux"),
             "{err}"
         );
     }
@@ -801,10 +796,22 @@ mod tests {
     }
 
     #[test]
-    fn test_filtered_alias_rejects_writable_alias() {
+    fn test_deny_read_manifest_rejects_writable_alias() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("skill");
         std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(source_root.join("SKILL.md"), "skill").unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "SKILL.md"}
+                ]
+            }"#,
+        )
+        .unwrap();
 
         let config = FilesystemConfig {
             binds: vec![crate::config::schema::FilesystemBindConfig {
@@ -813,23 +820,34 @@ mod tests {
                 writable: Some(true),
             }],
             deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
-            deny_list_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
             ..Default::default()
         };
 
         let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
         assert!(
             err.to_string()
-                .contains("Writable filesystem bind cannot use read/list glob filtering"),
+                .contains("Writable filesystem bind cannot use denyReadManifest"),
             "{err}"
         );
     }
 
     #[test]
-    fn test_filtered_alias_rejects_exact_alias_root_glob() {
+    fn test_deny_read_manifest_rejects_exact_alias_root_entry() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("skill");
         std::fs::create_dir_all(&source_root).unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "."}
+                ]
+            }"#,
+        )
+        .unwrap();
 
         let config = FilesystemConfig {
             binds: vec![crate::config::schema::FilesystemBindConfig {
@@ -838,24 +856,35 @@ mod tests {
                 writable: Some(false),
             }],
             deny_read_globs: vec!["/skills/triage".to_string()],
-            deny_list_globs: vec!["/skills/triage".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
             ..Default::default()
         };
 
         let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
         assert!(
             err.to_string()
-                .contains("Linux read/list glob filtering cannot target alias root exactly"),
+                .contains("denyReadManifest entry escapes bind target"),
             "{err}"
         );
     }
 
     #[test]
-    fn test_filtered_alias_rejects_denied_symlink() {
+    fn test_deny_read_manifest_rejects_path_traversal() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("skill");
         std::fs::create_dir_all(&source_root).unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", source_root.join("hidden.md")).unwrap();
+        std::fs::write(source_root.join("SKILL.md"), "skill").unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "../SKILL.md"}
+                ]
+            }"#,
+        )
+        .unwrap();
 
         let config = FilesystemConfig {
             binds: vec![crate::config::schema::FilesystemBindConfig {
@@ -864,14 +893,161 @@ mod tests {
                 writable: Some(false),
             }],
             deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
-            deny_list_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
             ..Default::default()
         };
 
         let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
         assert!(
             err.to_string()
-                .contains("Filtered filesystem bind does not support symlinks"),
+                .contains("denyReadManifest entry escapes bind target"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_deny_read_manifest_rejects_unknown_bind_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(source_root.join("SKILL.md"), "skill").unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/other", "relativePath": "SKILL.md"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("denyReadManifest references unknown bind target"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_deny_read_manifest_rejects_non_markdown_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(source_root.join("tool.json"), "{}").unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "tool.json"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("denyReadManifest entry must target .md"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_deny_read_manifest_rejects_missing_source_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "missing.md"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("denyReadManifest entry source does not exist"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_deny_read_manifest_rejects_denied_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("skill");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", source_root.join("hidden.md")).unwrap();
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{
+                "schemaVersion": 1,
+                "entries": [
+                    {"bindTarget": "/skills/triage", "relativePath": "hidden.md"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let config = FilesystemConfig {
+            binds: vec![crate::config::schema::FilesystemBindConfig {
+                source: source_root.display().to_string(),
+                target: "/skills/triage".to_string(),
+                writable: Some(false),
+            }],
+            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
+            deny_read_manifest: Some(manifest.display().to_string()),
+            ..Default::default()
+        };
+
+        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("denyReadManifest entry source is a symlink"),
             "{err}"
         );
     }
