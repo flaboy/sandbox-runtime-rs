@@ -113,6 +113,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_deny_read_manifest() {
+        let json = r#"{
+            "filesystem": {
+                "binds": [],
+                "denyRead": [],
+                "denyReadGlobs": ["/skills/demo/**/*.md"],
+                "denyReadManifest": "/tmp/srt-read-deny/demo.json",
+                "denyListGlobs": []
+            }
+        }"#;
+
+        let config = parse_config(json).unwrap();
+        assert_eq!(
+            config.filesystem.deny_read_manifest.as_deref(),
+            Some("/tmp/srt-read-deny/demo.json")
+        );
+    }
+
+    #[test]
     fn test_invalid_domain_pattern() {
         let json = r#"{
             "network": {

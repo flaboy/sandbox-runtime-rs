@@ -66,6 +66,10 @@ pub struct FilesystemConfig {
     #[serde(default)]
     pub deny_read_globs: Vec<String>,
 
+    /// Manifest file containing concrete read-deny entries.
+    #[serde(default)]
+    pub deny_read_manifest: Option<String>,
+
     /// Glob patterns hidden or denied from directory listing.
     #[serde(default)]
     pub deny_list_globs: Vec<String>,
