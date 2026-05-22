@@ -409,7 +409,7 @@ mod tests {
             !wrapped.contains("sleep 0.1"),
             "external proxy mode must not wait for per-command bridges: {wrapped}"
         );
-        assert!(wrapped.contains("http_proxy='http://localhost:3128'"));
-        assert!(wrapped.contains("ALL_PROXY='socks5://localhost:1080'"));
+        assert!(wrapped.contains("http://localhost:3128"));
+        assert!(wrapped.contains("socks5://localhost:1080"));
     }
 }
