@@ -487,34 +487,6 @@ fn generate_read_deny_manifest_mounts(
             )));
         }
 
-        let source_path = alias.source.join(&relative);
-        let metadata = fs::symlink_metadata(&source_path).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                SandboxError::ExecutionFailed(format!(
-                    "denyReadManifest entry source does not exist: {}",
-                    source_path.display()
-                ))
-            } else {
-                SandboxError::ExecutionFailed(format!(
-                    "Failed to inspect denyReadManifest entry source '{}': {}",
-                    source_path.display(),
-                    err
-                ))
-            }
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(SandboxError::ExecutionFailed(format!(
-                "denyReadManifest entry source is a symlink: {}",
-                source_path.display()
-            )));
-        }
-        if !metadata.is_file() {
-            return Err(SandboxError::ExecutionFailed(format!(
-                "denyReadManifest entry source is not a regular file: {}",
-                source_path.display()
-            )));
-        }
-
         mounts.push(BindMount::block(alias.target.join(relative)));
     }
 
@@ -980,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deny_read_manifest_rejects_missing_source_file() {
+    fn test_deny_read_manifest_does_not_stat_source_file() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("skill");
         std::fs::create_dir_all(&source_root).unwrap();
@@ -1007,48 +979,14 @@ mod tests {
             ..Default::default()
         };
 
-        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
+        let (mounts, warnings) = generate_bind_mounts(&config, temp.path(), None, None).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert!(
-            err.to_string()
-                .contains("denyReadManifest entry source does not exist"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_deny_read_manifest_rejects_denied_symlink() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_root = temp.path().join("skill");
-        std::fs::create_dir_all(&source_root).unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", source_root.join("hidden.md")).unwrap();
-        let manifest = temp.path().join("manifest.json");
-        std::fs::write(
-            &manifest,
-            r#"{
-                "schemaVersion": 1,
-                "entries": [
-                    {"bindTarget": "/skills/triage", "relativePath": "hidden.md"}
-                ]
-            }"#,
-        )
-        .unwrap();
-
-        let config = FilesystemConfig {
-            binds: vec![crate::config::schema::FilesystemBindConfig {
-                source: source_root.display().to_string(),
-                target: "/skills/triage".to_string(),
-                writable: Some(false),
-            }],
-            deny_read_globs: vec!["/skills/triage/**/*.md".to_string()],
-            deny_read_manifest: Some(manifest.display().to_string()),
-            ..Default::default()
-        };
-
-        let err = generate_bind_mounts(&config, temp.path(), None, None).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("denyReadManifest entry source is a symlink"),
-            "{err}"
+            mounts.iter().any(|mount| {
+                mount.source == PathBuf::from("/dev/null")
+                    && mount.target == PathBuf::from("/skills/triage/missing.md")
+            }),
+            "{mounts:?}"
         );
     }
 }
