@@ -18,6 +18,10 @@ pub struct MitmProxyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkConfig {
+    /// Proxy execution mode. "external" means commands use an already-running pod-level proxy.
+    #[serde(default)]
+    pub proxy_mode: Option<String>,
+
     /// Domains allowed for network access (e.g., "github.com", "*.npmjs.org").
     #[serde(default)]
     pub allowed_domains: Vec<String>,
@@ -52,6 +56,28 @@ pub struct NetworkConfig {
     /// MITM proxy configuration.
     #[serde(default)]
     pub mitm_proxy: Option<MitmProxyConfig>,
+}
+
+impl NetworkConfig {
+    /// Whether sandboxed commands should use an externally managed pod-level proxy.
+    pub fn is_external_proxy_mode(&self) -> bool {
+        matches!(self.proxy_mode.as_deref(), Some("external"))
+    }
+
+    /// Return the configured proxy ports, failing fast if external mode is incomplete.
+    pub fn required_proxy_ports(&self) -> Result<(u16, u16), SandboxError> {
+        let http = self.http_proxy_port.ok_or_else(|| {
+            ConfigError::ValidationError(
+                "network.httpProxyPort is required when network.proxyMode is external".to_string(),
+            )
+        })?;
+        let socks = self.socks_proxy_port.ok_or_else(|| {
+            ConfigError::ValidationError(
+                "network.socksProxyPort is required when network.proxyMode is external".to_string(),
+            )
+        })?;
+        Ok((http, socks))
+    }
 }
 
 /// Filesystem restriction configuration.
@@ -206,6 +232,16 @@ impl SandboxRuntimeConfig {
         // Validate denied domains
         for domain in &self.network.denied_domains {
             validate_domain_pattern(domain)?;
+        }
+
+        if let Some(mode) = self.network.proxy_mode.as_deref() {
+            if mode != "external" {
+                return Err(ConfigError::ValidationError(format!(
+                    "network.proxyMode must be external when set, got {mode}"
+                ))
+                .into());
+            }
+            self.network.required_proxy_ports()?;
         }
 
         // Validate MITM proxy domains

@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(long = "control-fd")]
     pub control_fd: Option<i32>,
 
+    /// Start the configured proxy servers and keep running until terminated.
+    #[arg(long = "proxy-server")]
+    pub proxy_server: bool,
+
     /// Command and arguments to run
     #[arg(trailing_var_arg = true)]
     pub args: Vec<String>,
@@ -131,6 +135,13 @@ mod tests {
     #[test]
     fn test_only_options_without_command_returns_none() {
         let cli = Cli::parse_from(["srt", "-d"]);
+        assert!(cli.get_command().is_none());
+    }
+
+    #[test]
+    fn test_proxy_server_mode_does_not_require_command() {
+        let cli = Cli::parse_from(["srt", "--proxy-server"]);
+        assert!(cli.proxy_server);
         assert!(cli.get_command().is_none());
     }
 }

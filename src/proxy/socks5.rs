@@ -33,7 +33,16 @@ pub struct Socks5Proxy {
 impl Socks5Proxy {
     /// Create a new SOCKS5 proxy server.
     pub async fn new(filter: DomainFilter) -> Result<Self, SandboxError> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::bind(filter, "127.0.0.1:0").await
+    }
+
+    /// Create a new SOCKS5 proxy server on a fixed localhost port.
+    pub async fn new_on_port(filter: DomainFilter, port: u16) -> Result<Self, SandboxError> {
+        Self::bind(filter, &format!("127.0.0.1:{port}")).await
+    }
+
+    async fn bind(filter: DomainFilter, address: &str) -> Result<Self, SandboxError> {
+        let listener = TcpListener::bind(address).await?;
         let port = listener.local_addr()?.port();
 
         tracing::debug!("SOCKS5 proxy listening on port {}", port);

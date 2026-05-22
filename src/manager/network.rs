@@ -31,6 +31,30 @@ pub async fn initialize_proxies(
     Ok((http_proxy, socks_proxy))
 }
 
+/// Initialize fixed-port proxy servers for a pod-level proxy process.
+pub async fn initialize_configured_proxies(
+    config: &NetworkConfig,
+) -> Result<(HttpProxy, Socks5Proxy), SandboxError> {
+    let (http_port, socks_port) = config.required_proxy_ports()?;
+    let filter = DomainFilter::from_config(config);
+    let mitm_socket_path = config.mitm_proxy.as_ref().map(|m| m.socket_path.clone());
+
+    let mut http_proxy =
+        HttpProxy::new_on_port(filter.clone(), mitm_socket_path, http_port).await?;
+    http_proxy.start()?;
+
+    let mut socks_proxy = Socks5Proxy::new_on_port(filter, socks_port).await?;
+    socks_proxy.start()?;
+
+    tracing::info!(
+        "Configured proxies started - HTTP: {}, SOCKS5: {}",
+        http_proxy.port(),
+        socks_proxy.port()
+    );
+
+    Ok((http_proxy, socks_proxy))
+}
+
 /// Generate proxy environment variables for sandboxed commands.
 #[allow(dead_code)]
 pub fn generate_proxy_env_vars(

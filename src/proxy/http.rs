@@ -31,8 +31,24 @@ impl HttpProxy {
         filter: DomainFilter,
         mitm_socket_path: Option<String>,
     ) -> Result<Self, SandboxError> {
-        // Bind to localhost on any available port
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::bind(filter, mitm_socket_path, "127.0.0.1:0").await
+    }
+
+    /// Create a new HTTP proxy server on a fixed localhost port.
+    pub async fn new_on_port(
+        filter: DomainFilter,
+        mitm_socket_path: Option<String>,
+        port: u16,
+    ) -> Result<Self, SandboxError> {
+        Self::bind(filter, mitm_socket_path, &format!("127.0.0.1:{port}")).await
+    }
+
+    async fn bind(
+        filter: DomainFilter,
+        mitm_socket_path: Option<String>,
+        address: &str,
+    ) -> Result<Self, SandboxError> {
+        let listener = TcpListener::bind(address).await?;
         let port = listener.local_addr()?.port();
 
         tracing::debug!("HTTP proxy listening on port {}", port);

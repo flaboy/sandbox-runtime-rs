@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use sandbox_runtime::cli::Cli;
 use sandbox_runtime::config::{load_config, load_config_from_string, load_default_config};
-use sandbox_runtime::manager::SandboxManager;
+use sandbox_runtime::manager::{network, SandboxManager};
 use sandbox_runtime::utils::init_debug_logging;
 
 #[tokio::main]
@@ -36,6 +36,30 @@ async fn main() -> ExitCode {
             }
         },
     };
+
+    if cli.proxy_server {
+        if let Err(e) = config.validate() {
+            eprintln!("Invalid proxy server config: {}", e);
+            return ExitCode::from(1);
+        }
+        let (mut http_proxy, mut socks_proxy) =
+            match network::initialize_configured_proxies(&config.network).await {
+                Ok(proxies) => proxies,
+                Err(e) => {
+                    eprintln!("Failed to start configured proxies: {}", e);
+                    return ExitCode::from(1);
+                }
+            };
+        tracing::info!(
+            "SRT proxy server ready (HTTP proxy: {}, SOCKS proxy: {})",
+            http_proxy.port(),
+            socks_proxy.port()
+        );
+        wait_for_shutdown_signal().await;
+        http_proxy.stop();
+        socks_proxy.stop();
+        return ExitCode::SUCCESS;
+    }
 
     // Get command to execute
     let (command, _shell_mode) = match cli.get_command() {
@@ -160,5 +184,29 @@ async fn main() -> ExitCode {
             eprintln!("Failed to execute command: {}", e);
             ExitCode::from(1)
         }
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(e) => {
+                    tracing::warn!("Failed to install SIGTERM handler: {}", e);
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }

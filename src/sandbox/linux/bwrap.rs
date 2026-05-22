@@ -46,7 +46,6 @@ pub fn generate_bwrap_command(
     // Build bwrap arguments
     let mut bwrap_args = vec![
         "bwrap".to_string(),
-        "--unshare-net".to_string(), // Network isolation
         "--proc".to_string(),
         "/proc".to_string(),
         "--tmpfs".to_string(),
@@ -54,6 +53,9 @@ pub fn generate_bwrap_command(
         "--tmpfs".to_string(),
         "/run".to_string(),
     ];
+    if !config.network.is_external_proxy_mode() {
+        bwrap_args.insert(1, "--unshare-net".to_string());
+    }
 
     // Start with read-only root filesystem
     bwrap_args.push("--ro-bind".to_string());
@@ -366,5 +368,48 @@ mod tests {
             root_bind < dev_mount,
             "/dev mount must be applied after readonly root so /dev/null stays usable: {wrapped}"
         );
+    }
+
+    #[test]
+    fn test_external_proxy_mode_uses_pod_network_without_per_command_bridge() {
+        let config = SandboxRuntimeConfig {
+            network: NetworkConfig {
+                proxy_mode: Some("external".to_string()),
+                allow_all_unix_sockets: Some(true),
+                http_proxy_port: Some(3128),
+                socks_proxy_port: Some(1080),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let cwd = std::env::current_dir().expect("current dir should resolve");
+
+        let (wrapped, warnings) = generate_bwrap_command(
+            "echo hello",
+            &config,
+            &cwd,
+            None,
+            None,
+            3128,
+            1080,
+            Some("/bin/bash"),
+        )
+        .expect("bwrap command should build");
+
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert!(
+            !wrapped.contains("--unshare-net"),
+            "external proxy mode must use the pod network: {wrapped}"
+        );
+        assert!(
+            !wrapped.contains("socat "),
+            "external proxy mode must not start per-command socat bridges: {wrapped}"
+        );
+        assert!(
+            !wrapped.contains("sleep 0.1"),
+            "external proxy mode must not wait for per-command bridges: {wrapped}"
+        );
+        assert!(wrapped.contains("http_proxy='http://localhost:3128'"));
+        assert!(wrapped.contains("ALL_PROXY='socks5://localhost:1080'"));
     }
 }
